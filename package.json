@@ -1,0 +1,34 @@
+{
+  "name": "launchmap",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hosted launch boards. Paste a script, tweet a public URL, watch visitors and the first dollar.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types",
+    "db:migrate:local": "wrangler d1 migrations apply launchmap --local",
+    "db:migrate:remote": "wrangler d1 migrations apply launchmap --remote",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "hono": "^4.9.8",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.13.0",
+    "@cloudflare/workers-types": "latest",
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.4",
+    "wrangler": "4.34.0"
+  }
+}
