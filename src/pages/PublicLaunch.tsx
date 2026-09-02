@@ -23,10 +23,10 @@ export default function PublicLaunch({ slug }: { slug: string }) {
   return (
     <div className="wrap">
       <nav className="nav">
-        <a className="brand" href="/" onClick={(e) => { e.preventDefault(); go("/"); }}><i /> Launchmap</a>
+        <a className="brand" href="/" onClick={(e) => { e.preventDefault(); go("/"); }}><i /> Cairn</a>
         <button className="btn ghost" onClick={() => navigator.clipboard.writeText(window.location.href)}>Copy tweet URL</button>
       </nav>
-      <h1 style={{ fontSize: 42, marginBottom: 18 }}>{board.launch.name}</h1>
+      <div className="hero-copy" style={{ padding: "12px 0 18px" }}><h1 style={{ fontSize: 32 }}>{board.launch.name}</h1></div>
       <LaunchBoard data={board} />
       <p className="lede" style={{ marginTop: 18 }}>{board.launch.site_url ? `Tracking ${board.launch.site_url}` : "Add the embed script to start real traffic."}</p>
     </div>

@@ -29,10 +29,13 @@
     }
   ],
   "vars": {
-    "APP_NAME": "Launchmap",
+    "APP_NAME": "Cairn",
     "DODO_PAYMENTS_ENVIRONMENT": "test"
   },
   "observability": {
     "enabled": true
+  },
+  "triggers": {
+    "crons": ["0 3 * * *"]
   }
 }

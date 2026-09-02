@@ -1,6 +1,6 @@
 # Launchmap
 
-Hosted launch boards. Customers pay, paste a 1KB script, tweet a public URL. Not a starter kit.
+Hosted launch boards. Customers pay, paste a 1KB script, tweet a public URL. Hosted product.
 
 See .dev.vars.example for local config.
 

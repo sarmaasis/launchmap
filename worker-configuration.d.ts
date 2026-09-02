@@ -21,5 +21,11 @@ interface Env {
   DODO_PAYMENTS_ENVIRONMENT: string;
   DODO_PRODUCT_ID: string;
   DODO_MONTHLY_PRODUCT_ID?: string;
+  DODO_PRO_PRODUCT_ID?: string;
+  DODO_BUSINESS_PRODUCT_ID?: string;
   DODO_PRICE?: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
 }

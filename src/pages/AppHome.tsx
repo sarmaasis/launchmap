@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { go } from "../lib/nav";
+import DataRights from "../ui/DataRights";
+import LaunchBoard, { type BoardData } from "../ui/LaunchBoard";
 
 type Launch = { id: string; name: string; slug: string; site_url: string | null; public_url: string; watermark: boolean; manual_revenue_cents: number };
 type Ent = { email: string; plan: string; can_create: boolean; watermark: boolean; launch_credits: number; launch_count: number };
@@ -7,12 +9,14 @@ type Ent = { email: string; plan: string; can_create: boolean; watermark: boolea
 export default function AppHome() {
   const [ent, setEnt] = useState<Ent | null>(null);
   const [launches, setLaunches] = useState<Launch[]>([]);
-  const [name, setName] = useState("");
-  const [slug, setSlug] = useState("");
   const [site, setSite] = useState("");
   const [err, setErr] = useState("");
   const [picked, setPicked] = useState<Launch | null>(null);
   const [rev, setRev] = useState("0");
+  const [range, setRange] = useState("30d");
+  const [board, setBoard] = useState<BoardData | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [panel, setPanel] = useState<"board" | "install" | "plan">("board");
 
   async function load() {
     const me = await fetch("/api/me");
@@ -21,21 +25,44 @@ export default function AppHome() {
     const data = await list.json() as { launches: Launch[]; entitlement: Ent };
     setLaunches(data.launches);
     setEnt(data.entitlement);
-    if (data.launches[0]) { setPicked(data.launches[0]); setRev(String((data.launches[0].manual_revenue_cents || 0) / 100)); }
+    const next = data.launches.find((l) => l.id === picked?.id) ?? data.launches[0] ?? null;
+    if (next) {
+      setPicked(next);
+      setRev(String((next.manual_revenue_cents || 0) / 100));
+    }
   }
+
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    if (!picked) { setBoard(null); return; }
+    let alive = true;
+    const tick = async () => {
+      const res = await fetch(`/api/launches/${picked.id}/analytics?range=${range}`);
+      if (!res.ok || !alive) return;
+      setBoard(await res.json() as BoardData);
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => { alive = false; clearInterval(id); };
+  }, [picked?.id, range]);
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
     setErr("");
-    const res = await fetch("/api/launches", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, slug, site_url: site }) });
+    let host = site.trim();
+    if (host && !/^https?:\/\//.test(host)) host = `https://${host}`;
+    let name = host;
+    try { name = new URL(host).hostname.replace(/^www\./, ""); } catch { /* keep */ }
+    const res = await fetch("/api/launches", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, slug: name.replace(/\./g, "-"), site_url: host }) });
     const data = await res.json() as { error?: string };
-    if (!res.ok) { setErr(data.error ?? "Could not create"); return; }
-    setName(""); setSlug(""); setSite("");
+    if (!res.ok) { setErr(data.error ?? "Could not add site"); return; }
+    setSite("");
+    setPanel("install");
     await load();
   }
 
-  async function checkout(plan: "monthly" | "one_launch") {
+  async function checkout(plan: "pro" | "business") {
     const res = await fetch("/api/checkout", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ plan, launch_id: picked?.id }) });
     const data = await res.json() as { checkout_url?: string; error?: string };
     if (!res.ok || !data.checkout_url) { setErr(data.error ?? "Checkout is not configured"); return; }
@@ -44,67 +71,98 @@ export default function AppHome() {
 
   async function saveRevenue() {
     if (!picked) return;
-    const cents = Math.round(Number(rev) * 100);
-    await fetch(`/api/launches/${picked.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ manual_revenue_cents: cents }) });
+    await fetch(`/api/launches/${picked.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ manual_revenue_cents: Math.round(Number(rev) * 100) }) });
     await load();
   }
 
   const origin = window.location.origin;
+  const snippet = picked ? `<script src="${origin}/embed.js" data-slug="${picked.slug}" async></script>` : "";
+
   return (
-    <div className="wrap">
-      <nav className="nav">
-        <a className="brand" href="/" onClick={(e) => { e.preventDefault(); go("/"); }}><i /> Launchmap</a>
-        <div className="nav-links">
-          <span>{ent?.email}</span>
-          <button className="btn ghost" onClick={async () => { await fetch("/api/auth/logout", { method: "POST" }); go("/"); }}>Log out</button>
+    <div className="shell">
+      <aside className="rail">
+        <a className="brand" href="/" onClick={(e) => { e.preventDefault(); go("/"); }}><i /> Cairn</a>
+        <p className="rail-kicker">Sites</p>
+        <nav className="rail-nav">
+          {launches.map((l) => (
+            <button key={l.id} className={picked?.id === l.id ? "rail-item on" : "rail-item"} type="button" onClick={() => { setPicked(l); setRev(String((l.manual_revenue_cents || 0) / 100)); setPanel("board"); }}>{l.name}</button>
+          ))}
+        </nav>
+        <div className="rail-foot">
+          <button className={panel === "install" ? "rail-item on" : "rail-item"} type="button" onClick={() => setPanel("install")} disabled={!picked}>Install</button>
+          <button className={panel === "plan" ? "rail-item on" : "rail-item"} type="button" onClick={() => setPanel("plan")}>Plan</button>
+          <p className="rail-email">{ent?.email}</p>
+          <button className="btn ghost" type="button" onClick={async () => { await fetch("/api/auth/logout", { method: "POST" }); go("/"); }}>Log out</button>
         </div>
-      </nav>
-      <div className="grid-2">
-        <div className="card">
-          <h2>New launch</h2>
-          <p className="lede">Free accounts get one board. {ent?.can_create ? "You can create another." : "Unlock more with checkout."}</p>
-          <form className="form" onSubmit={create}>
-            <label>Name</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme launch week" required />
-            <label>Slug</label>
-            <input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="acme" />
-            <label>Site URL</label>
-            <input value={site} onChange={(e) => setSite(e.target.value)} placeholder="https://acme.com" />
-            <button className="btn" type="submit">Create board</button>
-          </form>
-          {err ? <p className="err">{err}</p> : null}
-        </div>
-        <div className="card">
-          <h2>Unlock</h2>
-          <p className="lede">Plan: {ent?.plan ?? "free"}. Credits: {ent?.launch_credits}. Watermark: {ent?.watermark ? "on" : "off"}.</p>
-          <div className="hero-actions">
-            <button className="btn" onClick={() => checkout("one_launch")}>Pay $19 for one launch</button>
-            <button className="btn teal" onClick={() => checkout("monthly")}>$9/mo unlimited</button>
-          </div>
-        </div>
-      </div>
-      <div style={{ height: 18 }} />
-      {launches.map((l) => (
-        <div className="card" key={l.id} style={{ marginBottom: 12 }}>
-          <h3>{l.name}</h3>
-          <p><a href={l.public_url} onClick={(e) => { e.preventDefault(); go(`/l/${l.slug}`); }}>{l.public_url}</a></p>
-          <p className="lede">Paste this on {l.site_url || "your site"}.</p>
-          <pre className="snippet">{`<script src="${origin}/embed.js" data-slug="${l.slug}" async></script>`}</pre>
-          <div className="hero-actions" style={{ marginTop: 12 }}>
-            <button className="btn ghost" onClick={() => { setPicked(l); setRev(String((l.manual_revenue_cents || 0) / 100)); navigator.clipboard.writeText(`<script src="${origin}/embed.js" data-slug="${l.slug}" async></script>`); }}>Copy snippet</button>
-          </div>
-        </div>
-      ))}
-      {picked ? (
-        <div className="card">
-          <h3>Manual revenue for {picked.name}</h3>
-          <p className="lede">If you are not sending Dodo webhooks yet, type the first dollar here. It shows on the public board.</p>
-          <div className="hero-actions">
-            <input value={rev} onChange={(e) => setRev(e.target.value)} style={{ maxWidth: 160 }} />
-            <button className="btn ghost" onClick={saveRevenue}>Save dollars</button>
-          </div>
-        </div>
-      ) : null}
+      </aside>
+      <main className="work">
+        {!launches.length ? (
+          <section className="onboard">
+            <p className="kicker">Onboarding</p>
+            <h1>Add the first website</h1>
+            <ol className="steps">
+              <li className="done">Signed in as {ent?.email ?? "you"}</li>
+              <li className="now">Paste the site URL</li>
+              <li>Install the script. Traffic shows here.</li>
+            </ol>
+            <form className="form onboard-form" onSubmit={create}>
+              <label htmlFor="site">Website URL</label>
+              <input id="site" value={site} onChange={(e) => setSite(e.target.value)} placeholder="acme.com" required autoFocus />
+              <button className="btn" type="submit">Continue</button>
+            </form>
+            {err ? <p className="err">{err}</p> : null}
+          </section>
+        ) : panel === "install" && picked ? (
+          <section className="onboard">
+            <p className="kicker">Install</p>
+            <h1>One line in the head</h1>
+            <p className="lede">Paste once on {picked.site_url || "your site"}. Call <code>window.cairnSignup()</code> when someone signs up.</p>
+            <pre className="snippet">{snippet}</pre>
+            <div className="hero-actions">
+              <button className="btn" type="button" onClick={() => { navigator.clipboard.writeText(snippet); setCopied(true); }}> {copied ? "Copied" : "Copy snippet"}</button>
+              <button className="btn ghost" type="button" onClick={() => setPanel("board")}>Open dashboard</button>
+            </div>
+          </section>
+        ) : panel === "plan" ? (
+          <section className="onboard">
+            <p className="kicker">Plan</p>
+            <h1>{ent?.plan ?? "free"}</h1>
+            <p className="lede">Watermark {ent?.watermark ? "on" : "off"}. {ent?.can_create ? "You can add another site." : "Upgrade to add sites."}</p>
+            <form className="form onboard-form" onSubmit={create}>
+              <label>Add another website</label>
+              <input value={site} onChange={(e) => setSite(e.target.value)} placeholder="another.com" />
+              <button className="btn ghost" type="submit">Add site</button>
+            </form>
+            <div className="hero-actions">
+              <button className="btn" type="button" onClick={() => checkout("pro")}>Pro $29/mo</button>
+              <button className="btn ghost" type="button" onClick={() => checkout("business")}>Business $79/mo</button>
+            </div>
+            <p className="lede">Manual revenue (USD) if Dodo is not posting yet.</p>
+            <div className="hero-actions">
+              <input value={rev} onChange={(e) => setRev(e.target.value)} style={{ maxWidth: 120 }} />
+              <button className="btn ghost" type="button" onClick={saveRevenue}>Save</button>
+            </div>
+            {err ? <p className="err">{err}</p> : null}
+            <DataRights setErr={setErr} />
+          </section>
+        ) : (
+          <>
+            <header className="work-head">
+              <div>
+                <h1>{picked?.name}</h1>
+                <p className="fine">{picked?.site_url}</p>
+              </div>
+              <div className="hero-actions">
+                {(["24h", "7d", "30d"] as const).map((r) => (
+                  <button key={r} className={range === r ? "btn" : "btn ghost"} type="button" onClick={() => setRange(r)}>{r === "24h" ? "24h" : r === "7d" ? "7d" : "30d"}</button>
+                ))}
+                {picked ? <button className="btn ghost" type="button" onClick={() => { navigator.clipboard.writeText(picked.public_url); }}>Public URL</button> : null}
+              </div>
+            </header>
+            {board ? <LaunchBoard data={board} liveLabel={range === "24h" ? "Last 24 hours" : range === "7d" ? "Last 7 days" : "Last 30 days"} /> : <div className="dash" style={{ minHeight: 320 }} />}
+          </>
+        )}
+      </main>
     </div>
   );
 }

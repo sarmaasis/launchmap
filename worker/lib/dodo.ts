@@ -5,7 +5,12 @@ export function dodoApiBase(envName: string | undefined): string {
 }
 
 export function monthlyProductId(env: Env): string | undefined {
-  return env.DODO_MONTHLY_PRODUCT_ID || env.DODO_PRICE || undefined;
+  return env.DODO_PRO_PRODUCT_ID || env.DODO_MONTHLY_PRODUCT_ID || env.DODO_PRICE || undefined;
+}
+
+export function productIdForPlan(env: Env, plan: string): string | undefined {
+  if (plan === "business") return env.DODO_BUSINESS_PRODUCT_ID || env.DODO_PRODUCT_ID || undefined;
+  return monthlyProductId(env);
 }
 
 export async function createDodoCheckoutSession(opts: {

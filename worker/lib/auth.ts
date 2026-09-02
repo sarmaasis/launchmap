@@ -26,13 +26,22 @@ async function hashToken(secret: string | undefined, token: string): Promise<str
   return sha256Hex(`${secret ?? ""}:${token}`);
 }
 
+export function paidPlan(plan: string): boolean {
+  return plan === "pro" || plan === "business" || plan === "monthly";
+}
+
+export function siteLimit(plan: string): number {
+  if (plan === "business") return 50;
+  if (plan === "pro" || plan === "monthly") return 10;
+  return 1;
+}
+
 export function canCreateLaunch(user: UserRow, existingCount: number): boolean {
-  if (user.plan === "monthly" && (user.plan_status === "active" || !user.plan_status)) return true;
-  return existingCount < user.launch_credits;
+  return existingCount < siteLimit(user.plan);
 }
 
 export function showWatermark(user: Pick<UserRow, "plan" | "watermark">): boolean {
-  if (user.plan === "monthly") return false;
+  if (paidPlan(user.plan)) return false;
   return user.watermark !== 0;
 }
 
