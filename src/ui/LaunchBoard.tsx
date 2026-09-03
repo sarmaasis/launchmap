@@ -1,25 +1,65 @@
+import { useState } from "react";
+
 export type SourceRow = { name: string; visitors: number; revenue_cents: number };
 export type PageRow = { path: string; views: number };
 export type CountryRow = { country: string; visitors: number };
 export type SearchRow = { query: string; clicks: number };
 export type DeviceRow = { name: string; pct: number };
+export type SeriesPoint = { hour_ts: number; views: number; uniques: number; signups: number; revenue_cents: number };
+export type FunnelStep = { name: string; count: number };
+export type VisitorHit = {
+  id: string;
+  kind: string;
+  name?: string | null;
+  vid?: string | null;
+  country: string | null;
+  city: string | null;
+  lat: number | null;
+  lng: number | null;
+  path: string | null;
+  amount_cents: number;
+  created_at: number;
+  referrer?: string | null;
+  unverified?: boolean;
+};
 
 export type BoardData = {
   launch: { name: string; slug: string; site_url: string | null };
-  stats: { views: number; unique: number; signups: number; revenue_cents: number };
-  visitors: Array<{ id: string; kind: string; country: string | null; city: string | null; lat: number | null; lng: number | null; path: string | null; amount_cents: number; created_at: number; referrer?: string | null }>;
+  stats: { views: number; unique: number; signups: number; revenue_cents: number; customers?: number; rpv?: number };
+  visitors: VisitorHit[];
   sources?: SourceRow[];
+  sources_last?: SourceRow[];
   pages?: PageRow[];
   countries?: CountryRow[];
   search?: SearchRow[];
   ai?: SourceRow[];
   devices?: DeviceRow[];
+  series?: SeriesPoint[];
+  funnel?: FunnelStep[];
+  touch?: "first" | "last";
+  live?: boolean;
   watermark?: boolean;
   demo?: boolean;
 };
 
+export type JourneyData = {
+  vid: string;
+  visitor: {
+    first_referrer?: string | null;
+    last_referrer?: string | null;
+    first_path?: string | null;
+    last_path?: string | null;
+  } | null;
+  events: Array<{ id: string; kind: string; name: string | null; path: string | null; referrer: string | null; amount_cents: number; created_at: number }>;
+  payments: Array<{ id: string; amount_cents: number; refunded_cents: number; kind: string; provider: string; created_at: number }>;
+};
+
 function money(cents: number) {
   return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+}
+
+function moneyExact(cents: number) {
+  return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function project(lat: number, lng: number, w: number, h: number) {
@@ -43,29 +83,34 @@ function Bar({ value, max }: { value: number; max: number }) {
   return <span className="bar"><i style={{ width: `${w}%` }} /></span>;
 }
 
-function Trend({ views, revenueCents }: { views: number; revenueCents: number }) {
-  const n = 14;
-  const vis = Array.from({ length: n }, (_, i) => Math.max(6, Math.round((views / n) * (0.5 + ((i * 3 + 5) % 8) / 14))));
-  const rev = Array.from({ length: n }, (_, i) => Math.max(1, Math.round((Math.max(revenueCents, 1900) / n / 100) * (0.35 + ((i * 5 + 2) % 9) / 12))));
+function Trend({ series }: { series: SeriesPoint[] }) {
+  if (!series.length) {
+    return (
+      <div className="chart-wrap">
+        <p className="muted">No hourly data yet. Traffic will plot here as it arrives.</p>
+      </div>
+    );
+  }
+  const vis = series.map((s) => s.views);
+  const rev = series.map((s) => s.revenue_cents);
   const maxV = Math.max(...vis, 1);
   const maxR = Math.max(...rev, 1);
+  const n = series.length;
   const W = 520;
   const H = 148;
   const pad = 12;
   const bw = (W - pad * 2) / n;
   const line = vis.map((v, i) => `${pad + i * bw + bw / 2},${H - pad - (v / maxV) * (H - pad * 2)}`).join(" ");
+  const showBars = n <= 48;
   return (
     <div className="chart-wrap">
       <svg className="trend" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
-        {vis.map((_, i) => (
-          <rect key={i} x={pad + i * bw + 3} y={H - pad - (rev[i] / maxR) * (H - pad * 2)} width={Math.max(6, bw - 8)} height={(rev[i] / maxR) * (H - pad * 2)} rx="2" fill="#18181b" opacity="0.14" />
-        ))}
+        {showBars ? vis.map((_, i) => (
+          <rect key={i} x={pad + i * bw + 1} y={H - pad - (rev[i] / maxR) * (H - pad * 2)} width={Math.max(2, bw - 3)} height={(rev[i] / maxR) * (H - pad * 2)} rx="1" fill="#18181b" opacity="0.14" />
+        )) : null}
         <polyline fill="none" stroke="#18181b" strokeWidth="1.6" points={line} />
-        {vis.map((v, i) => (
-          <circle key={i} cx={pad + i * bw + bw / 2} cy={H - pad - (v / maxV) * (H - pad * 2)} r="2.4" fill="#18181b" />
-        ))}
       </svg>
-      <div className="chart-legend"><span className="lg sky" /> Visitors <span className="lg coral" /> Revenue</div>
+      <div className="chart-legend"><span className="lg sky" /> Views <span className="lg coral" /> Revenue</div>
     </div>
   );
 }
@@ -101,22 +146,76 @@ function World({ visitors, watermark }: { visitors: BoardData["visitors"]; water
   );
 }
 
-export default function LaunchBoard({ data, liveLabel }: { data: BoardData; liveLabel?: string }) {
-  const sources = data.sources ?? [];
+function hitLine(v: VisitorHit) {
+  const bits = [
+    v.city || v.country || "Unknown",
+    v.kind,
+    v.name && v.name !== v.kind ? v.name : null,
+    v.path,
+    v.referrer && v.referrer !== "Direct" ? v.referrer : null,
+    v.kind === "payment" && v.amount_cents ? money(v.amount_cents) : null,
+    v.unverified ? "unverified" : null,
+  ].filter(Boolean);
+  return bits.join(" · ");
+}
+
+export default function LaunchBoard({
+  data,
+  liveLabel,
+  launchId,
+  touch,
+  onTouch,
+}: {
+  data: BoardData;
+  liveLabel?: string;
+  launchId?: string;
+  touch?: "first" | "last";
+  onTouch?: (t: "first" | "last") => void;
+}) {
+  const mode = touch ?? data.touch ?? "first";
+  const [localTouch, setLocalTouch] = useState<"first" | "last">(mode);
+  const activeTouch = onTouch ? mode : localTouch;
+  const [journey, setJourney] = useState<JourneyData | null>(null);
+  const [journeyErr, setJourneyErr] = useState("");
+  const sources = ((activeTouch === "last" && data.sources_last) ? data.sources_last : data.sources) ?? [];
   const pages = data.pages ?? [];
   const countries = data.countries ?? [];
   const search = data.search ?? [];
   const ai = data.ai ?? [];
+  const funnel = data.funnel ?? [];
+  const series = data.series ?? [];
   const maxSrc = Math.max(1, ...sources.map((s) => s.visitors));
   const maxPage = Math.max(1, ...pages.map((p) => p.views));
   const online = Math.max(0, data.visitors.filter((v) => Date.now() - v.created_at < 120000).length);
   const host = (data.launch.site_url || "https://acme.example").replace(/^https?:\/\//, "");
+  const paidRevenue = data.stats.revenue_cents > 0;
+
+  async function openJourney(vid: string) {
+    if (!launchId || data.demo) {
+      setJourney({
+        vid,
+        visitor: { first_referrer: data.visitors.find((v) => v.vid === vid)?.referrer || "Direct", first_path: "/" },
+        events: data.visitors.filter((v) => v.vid === vid).slice().reverse().map((v) => ({
+          id: v.id, kind: v.kind, name: v.name ?? null, path: v.path, referrer: v.referrer ?? null, amount_cents: v.amount_cents, created_at: v.created_at,
+        })),
+        payments: data.visitors.filter((v) => v.vid === vid && v.kind === "payment").map((v) => ({
+          id: v.id, amount_cents: v.amount_cents, refunded_cents: 0, kind: "one_time", provider: "demo", created_at: v.created_at,
+        })),
+      });
+      return;
+    }
+    setJourneyErr("");
+    const res = await fetch(`/api/launches/${launchId}/journey/${encodeURIComponent(vid)}`);
+    if (!res.ok) { setJourneyErr("Could not load journey."); return; }
+    setJourney(await res.json() as JourneyData);
+  }
+
   return (
     <div className="browser">
       <div className="dash">
         <div className="dash-head">
           <div>
-            <div className="dash-kicker">{liveLabel ?? (data.demo ? "Last 30 days" : "Live")}</div>
+            <div className="dash-kicker">{liveLabel ?? (data.demo ? "Live demo" : "Live")}</div>
             <strong>{host}</strong>
           </div>
           <span className="live-pill">{online} online</span>
@@ -124,44 +223,64 @@ export default function LaunchBoard({ data, liveLabel }: { data: BoardData; live
         <div className="metrics">
           <div className="metric"><span>Unique visitors</span><b>{data.stats.unique.toLocaleString()}</b></div>
           <div className="metric"><span>Signups</span><b>{data.stats.signups.toLocaleString()}</b></div>
+          <div className="metric"><span>Customers</span><b>{(data.stats.customers ?? 0).toLocaleString()}</b></div>
           <div className="metric"><span>Revenue</span><b>{money(data.stats.revenue_cents)}</b></div>
+          <div className="metric"><span>Revenue / visitor</span><b>{moneyExact(data.stats.rpv ?? 0)}</b></div>
           <div className="metric"><span>Signup rate</span><b>{conv(data.stats)}</b></div>
         </div>
-        <Trend views={data.stats.views} revenueCents={data.stats.revenue_cents} />
+        <Trend series={series} />
+        {funnel.length ? (
+          <div className="funnel">
+            {funnel.map((step, i) => (
+              <div className="funnel-step" key={step.name}>
+                {i > 0 ? <span className="funnel-then">then</span> : null}
+                <b>{step.count.toLocaleString()}</b>
+                <span>{step.name}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <div className="dash-main">
           <div className="dash-col">
-            <h4>Channels that paid</h4>
+            <div className="h4-row">
+              <h4>Channels that paid</h4>
+              <div className="touch">
+                <button type="button" className={activeTouch === "first" ? "btn" : "btn ghost"} onClick={() => (onTouch ? onTouch("first") : setLocalTouch("first"))}>First touch</button>
+                <button type="button" className={activeTouch === "last" ? "btn" : "btn ghost"} onClick={() => (onTouch ? onTouch("last") : setLocalTouch("last"))}>Last touch</button>
+              </div>
+            </div>
             <div className="table">
-              {sources.map((s) => (
+              {sources.length ? sources.map((s) => (
                 <div className="tr" key={s.name}>
                   <span className="td name">{s.name}</span>
                   <Bar value={s.visitors} max={maxSrc} />
                   <span className="td num">{s.visitors}</span>
-                  <span className="td num">{money(s.revenue_cents)}</span>
+                  <span className="td num">{paidRevenue || data.demo ? money(s.revenue_cents) : "$0"}</span>
                 </div>
-              ))}
+              )) : <p className="muted">No visitors in this range yet.</p>}
             </div>
+            {!paidRevenue && !data.demo ? <p className="muted">Channel revenue is $0 until a Dodo or Stripe payment joins a visitor id.</p> : null}
             <h4>AI referrers</h4>
             <div className="table">
-              {ai.map((s) => (
+              {ai.length ? ai.map((s) => (
                 <div className="tr" key={s.name}>
                   <span className="td name">{s.name}</span>
                   <span className="td num">{s.visitors}</span>
-                  <span className="td num">{money(s.revenue_cents)}</span>
+                  <span className="td num">{paidRevenue || data.demo ? money(s.revenue_cents) : "$0"}</span>
                 </div>
-              ))}
+              )) : <p className="muted">No AI referrers yet.</p>}
             </div>
           </div>
           <div className="dash-col">
             <h4>Where they are</h4>
             <World visitors={data.visitors} watermark={data.watermark} />
             <div className="feed">
-              {data.visitors.slice(0, 6).map((v) => (
-                <div className="hit" key={v.id}>
+              {data.visitors.slice(0, 12).map((v) => (
+                <button className="hit" type="button" key={v.id} onClick={() => v.vid && openJourney(v.vid)} disabled={!v.vid}>
                   <span className={`dot ${v.kind}`} />
-                  <span>{v.city || v.country || "Unknown"} · {v.kind}{v.path ? ` · ${v.path}` : ""}</span>
+                  <span>{hitLine(v)}</span>
                   <span>{ago(v.created_at)}</span>
-                </div>
+                </button>
               ))}
             </div>
           </div>
@@ -198,6 +317,22 @@ export default function LaunchBoard({ data, liveLabel }: { data: BoardData; live
           </div>
         </div>
       </div>
+      {journey ? (
+        <aside className="journey">
+          <div className="h4-row">
+            <h4>Journey</h4>
+            <button className="btn ghost" type="button" onClick={() => setJourney(null)}>Close</button>
+          </div>
+          {journeyErr ? <p className="err">{journeyErr}</p> : null}
+          <p className="journey-line"><span>Source</span> {journey.visitor?.first_referrer || "Direct"}</p>
+          <p className="funnel-then">then</p>
+          <p className="journey-line"><span>Pages</span> {(journey.events.filter((e) => e.kind === "pageview").map((e) => e.path).filter(Boolean) as string[]).join(" then ") || journey.visitor?.first_path || "/"}</p>
+          <p className="funnel-then">then</p>
+          <p className="journey-line"><span>Events</span> {journey.events.filter((e) => e.kind === "event" || e.kind === "signup").map((e) => e.name || e.kind).join(" then ") || "none yet"}</p>
+          <p className="funnel-then">then</p>
+          <p className="journey-line"><span>Payment</span> {journey.payments.length ? journey.payments.map((p) => money(p.amount_cents - p.refunded_cents)).join(", ") : "none"}</p>
+        </aside>
+      ) : null}
     </div>
   );
 }

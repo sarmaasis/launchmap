@@ -267,7 +267,7 @@ svg.world { width: 100%; height: 100%; display: block; }
 .mast h1 { font-size: clamp(40px, 6vw, 64px); font-weight: 500; letter-spacing: -0.04em; line-height: 1.05; }
 .browser { box-shadow: 0 1px 2px rgba(24,24,27,.04), 0 20px 40px rgba(24,24,27,.06); border-radius: 12px; }
 .browser-bar { display: none; }
-.metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.metrics { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .metric b { font-weight: 600; font-size: 22px; }
 .card.featured { border-color: var(--line); }
 .btn { font-weight: 500; }
@@ -275,3 +275,21 @@ svg.world { width: 100%; height: 100%; display: block; }
 .work { background: #fafafa; }
 .lg.sky { opacity: .35; }
 .or { text-transform: none; letter-spacing: 0; font-size: 13px; }
+
+.h4-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+.h4-row h4 { margin: 0; }
+.touch { display: flex; gap: 6px; }
+.touch .btn { padding: 5px 8px; font-size: 11px; }
+.funnel { display: flex; align-items: stretch; gap: 0; padding: 12px 16px; border-bottom: 1px solid var(--dash-line); overflow-x: auto; }
+.funnel-step { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.funnel-step b { font-size: 18px; }
+.funnel-step span { color: var(--dash-mute); font-size: 12px; }
+.funnel-then { color: var(--dim); font-size: 11px; margin: 0 8px; flex: 0; }
+.feed { max-height: 240px; }
+button.hit { width: 100%; border: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; }
+button.hit:disabled { cursor: default; opacity: .85; }
+button.hit:not(:disabled):hover { background: #fafafa; }
+.journey { padding: 14px 16px 18px; border-top: 1px solid var(--dash-line); background: #fafafa; }
+.journey-line { margin: 6px 0; font-size: 14px; }
+.journey-line span { display: block; font-size: 11px; color: var(--dash-mute); text-transform: uppercase; letter-spacing: .04em; }
+.dot.event { background: #ca8a04; }

@@ -14,6 +14,7 @@ export default function AppHome() {
   const [picked, setPicked] = useState<Launch | null>(null);
   const [rev, setRev] = useState("0");
   const [range, setRange] = useState("30d");
+  const [touch, setTouch] = useState<"first" | "last">("first");
   const [board, setBoard] = useState<BoardData | null>(null);
   const [copied, setCopied] = useState(false);
   const [panel, setPanel] = useState<"board" | "install" | "plan">("board");
@@ -38,14 +39,14 @@ export default function AppHome() {
     if (!picked) { setBoard(null); return; }
     let alive = true;
     const tick = async () => {
-      const res = await fetch(`/api/launches/${picked.id}/analytics?range=${range}`);
+      const res = await fetch(`/api/launches/${picked.id}/analytics?range=${range}&touch=${touch}`);
       if (!res.ok || !alive) return;
       setBoard(await res.json() as BoardData);
     };
     tick();
     const id = setInterval(tick, 4000);
     return () => { alive = false; clearInterval(id); };
-  }, [picked?.id, range]);
+  }, [picked?.id, range, touch]);
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
@@ -116,7 +117,7 @@ export default function AppHome() {
           <section className="onboard">
             <p className="kicker">Install</p>
             <h1>One line in the head</h1>
-            <p className="lede">Paste once on {picked.site_url || "your site"}. Call <code>window.cairnSignup()</code> when someone signs up.</p>
+            <p className="lede">Paste once on {picked.site_url || "your site"}. Call <code>window.cairnSignup()</code> on signup, <code>window.cairnEvent('pricing_click')</code> for custom events, and pass the visitor through checkout with <code>window.cairnCheckoutUrl(url)</code> or <code>data-cairn-checkout</code> on the link. Client <code>window.cairnPay(cents)</code> shows on the feed as unverified until a Dodo or Stripe webhook joins the same visitor id.</p>
             <pre className="snippet">{snippet}</pre>
             <div className="hero-actions">
               <button className="btn" type="button" onClick={() => { navigator.clipboard.writeText(snippet); setCopied(true); }}> {copied ? "Copied" : "Copy snippet"}</button>
@@ -157,9 +158,14 @@ export default function AppHome() {
                   <button key={r} className={range === r ? "btn" : "btn ghost"} type="button" onClick={() => setRange(r)}>{r === "24h" ? "24h" : r === "7d" ? "7d" : "30d"}</button>
                 ))}
                 {picked ? <button className="btn ghost" type="button" onClick={() => { navigator.clipboard.writeText(picked.public_url); }}>Public URL</button> : null}
+                {picked ? <button className="btn ghost" type="button" onClick={async () => {
+                  const next = !(board?.live ?? true);
+                  await fetch(`/api/launches/${picked.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ launch_mode: next }) });
+                  setBoard(board ? { ...board, live: next } : board);
+                }}>{board?.live === false ? "Start live" : "Pause live"}</button> : null}
               </div>
             </header>
-            {board ? <LaunchBoard data={board} liveLabel={range === "24h" ? "Last 24 hours" : range === "7d" ? "Last 7 days" : "Last 30 days"} /> : <div className="dash" style={{ minHeight: 320 }} />}
+            {board ? <LaunchBoard data={board} launchId={picked?.id} touch={touch} onTouch={setTouch} liveLabel={range === "24h" ? "Last 24 hours" : range === "7d" ? "Last 7 days" : "Last 30 days"} /> : <div className="dash" style={{ minHeight: 320 }} />}
           </>
         )}
       </main>

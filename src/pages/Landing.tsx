@@ -30,7 +30,7 @@ export default function Landing() {
       <header className="mast wrap">
         <p className="kicker">Revenue analytics</p>
         <h1>Which visit paid?</h1>
-        <p className="lede mast-lede">A payment hits the board. Next to it: the tweet, the search, or the ChatGPT thread that sent it. One script. One bill.</p>
+        <p className="lede mast-lede">A payment hits the board next to the visit that earned it. Cairn joins them with a first-party visitor id and checkout metadata. Webhooks live today: Dodo and Stripe.</p>
         <div className="hero-actions">
           <button className="btn" type="button" onClick={() => go("/login")}>Start trial</button>
           <a className="text-link" href="#product">See the board</a>
@@ -45,7 +45,7 @@ export default function Landing() {
         <dl className="jobs">
           <div>
             <dt>Channel to cash</dt>
-            <dd>Twitter, ads, direct. Ranked by who actually paid, not who bounced.</dd>
+            <dd>Twitter, ads, direct. Ranked by payments joined to a visitor, not by guessed totals.</dd>
           </div>
           <div>
             <dt>Search beside dollars</dt>

@@ -21,6 +21,19 @@ import { dayVisitorHash, retentionMs } from "./lib/hashday";
 import { eraseUser, exportAccount, purgeExpiredEvents } from "./lib/purge";
 import { securityHeaders } from "./lib/security";
 import { finishOAuth, oauthConfigured, startOAuth } from "./lib/oauth";
+import { loadBoard, loadJourney, type LaunchRow } from "./lib/board";
+import { embedScript } from "./embed";
+import {
+  applyRefund,
+  asRecord,
+  bumpHour,
+  hourFloor,
+  insertTrustedPayment,
+  num,
+  pickVid,
+  resolveLaunchId,
+  verifyStripeSignature,
+} from "./lib/payments";
 
 type App = { Bindings: Env };
 const app = new Hono<App>();
@@ -129,6 +142,9 @@ app.post("/api/launches", async (c) => {
     await c.env.DB.prepare(
       "INSERT INTO launches (id, user_id, name, slug, site_url, manual_revenue_cents, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
     ).bind(row.id, user.id, row.name, row.slug, row.site_url, row.created_at).run();
+    await c.env.DB.prepare(
+      "INSERT INTO launch_modes (launch_id, live, started_at, ended_at) VALUES (?, 1, ?, NULL)",
+    ).bind(row.id, row.created_at).run();
   } catch {
     return c.json({ error: "That slug is taken." }, 409);
   }
@@ -138,7 +154,7 @@ app.post("/api/launches", async (c) => {
 app.patch("/api/launches/:id", async (c) => {
   const user = await getSessionUser(c);
   if (!user) return c.json({ error: "Unauthorized" }, 401);
-  const body = await c.req.json().catch(() => ({})) as { name?: string; site_url?: string; manual_revenue_cents?: number };
+  const body = await c.req.json().catch(() => ({})) as { name?: string; site_url?: string; manual_revenue_cents?: number; launch_mode?: boolean };
   const launch = await c.env.DB.prepare("SELECT id FROM launches WHERE id = ? AND user_id = ?").bind(c.req.param("id"), user.id).first();
   if (!launch) return c.json({ error: "Not found" }, 404);
   if (typeof body.name === "string" && body.name.trim()) {
@@ -151,6 +167,17 @@ app.patch("/api/launches/:id", async (c) => {
     const cents = Math.max(0, Math.round(body.manual_revenue_cents));
     await c.env.DB.prepare("UPDATE launches SET manual_revenue_cents = ? WHERE id = ? AND user_id = ?").bind(cents, c.req.param("id"), user.id).run();
   }
+  if (typeof body.launch_mode === "boolean") {
+    const now = Date.now();
+    const live = body.launch_mode ? 1 : 0;
+    await c.env.DB.prepare(
+      `INSERT INTO launch_modes (launch_id, live, started_at, ended_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(launch_id) DO UPDATE SET
+         live = excluded.live,
+         started_at = CASE WHEN excluded.live = 1 THEN COALESCE(launch_modes.started_at, excluded.started_at) ELSE launch_modes.started_at END,
+         ended_at = CASE WHEN excluded.live = 0 THEN excluded.ended_at ELSE NULL END`,
+    ).bind(c.req.param("id"), live, now, live ? null : now).run();
+  }
   return c.json({ ok: true });
 });
 
@@ -160,7 +187,7 @@ app.get("/api/public/:slug", async (c) => {
     "SELECT launches.id, launches.name, launches.slug, launches.site_url, launches.manual_revenue_cents, launches.created_at, users.plan, users.watermark FROM launches JOIN users ON users.id = launches.user_id WHERE launches.slug = ?",
   ).bind(slug).first<LaunchRow & { plan: string; watermark: number }>();
   if (!launch) return c.json({ error: "Not found" }, 404);
-  const board = await loadBoard(c.env.DB, launch, rangeSince(c.req.query("range"), launch.plan));
+  const board = await loadBoard(c.env.DB, launch, rangeSince(c.req.query("range"), launch.plan), touchFromQuery(c.req.query("touch")));
   return c.json({ ...board, watermark: showWatermark(launch), range: c.req.query("range") || "30d" });
 });
 
@@ -171,8 +198,19 @@ app.get("/api/launches/:id/analytics", async (c) => {
     "SELECT id, name, slug, site_url, manual_revenue_cents, created_at FROM launches WHERE id = ? AND user_id = ?",
   ).bind(c.req.param("id"), user.id).first<LaunchRow>();
   if (!launch) return c.json({ error: "Not found" }, 404);
-  const board = await loadBoard(c.env.DB, launch, rangeSince(c.req.query("range"), user.plan));
+  const board = await loadBoard(c.env.DB, launch, rangeSince(c.req.query("range"), user.plan), touchFromQuery(c.req.query("touch")));
   return c.json({ ...board, watermark: showWatermark(user), range: c.req.query("range") || "30d" });
+});
+
+app.get("/api/launches/:id/journey/:vid", async (c) => {
+  const user = await getSessionUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const launch = await c.env.DB.prepare("SELECT id FROM launches WHERE id = ? AND user_id = ?").bind(c.req.param("id"), user.id).first();
+  if (!launch) return c.json({ error: "Not found" }, 404);
+  const vid = c.req.param("vid");
+  if (!vid) return c.json({ error: "Missing visitor" }, 400);
+  const journey = await loadJourney(c.env.DB, c.req.param("id"), vid);
+  return c.json(journey);
 });
 
 app.use("/t/:slug/collect", cors({ origin: "*", allowMethods: ["POST", "OPTIONS"], allowHeaders: ["Content-Type"] }));
@@ -184,9 +222,12 @@ app.post("/t/:slug/collect", async (c) => {
   if (limited) return c.json({ error: "rate_limited" }, 429);
   const launch = await c.env.DB.prepare("SELECT id, site_url FROM launches WHERE slug = ?").bind(slug).first<{ id: string; site_url: string | null }>();
   if (!launch) return c.json({ error: "not_found" }, 404);
-  const body = await c.req.json().catch(() => ({})) as { t?: string; type?: string; p?: string; path?: string; r?: string; referrer?: string; amount_cents?: number; us?: string; um?: string; uc?: string; h?: string };
+  const body = await c.req.json().catch(() => ({})) as {
+    t?: string; type?: string; p?: string; path?: string; r?: string; referrer?: string; amount_cents?: number;
+    us?: string; um?: string; uc?: string; h?: string; vid?: string; n?: string; name?: string; land?: string;
+  };
   const kindRaw = (body.t || body.type || "pageview").toLowerCase();
-  const kind = kindRaw === "signup" || kindRaw === "payment" ? kindRaw : "pageview";
+  const kind = kindRaw === "signup" || kindRaw === "payment" || kindRaw === "event" ? kindRaw : "pageview";
   const ua = c.req.header("user-agent") ?? "";
   const bot = isBot(ua) ? 1 : 0;
   const visitor_hash = await dayVisitorHash(ip, ua, c.env.SESSION_SECRET || "launchmap");
@@ -195,6 +236,13 @@ app.post("/t/:slug/collect", async (c) => {
   const referrer = channelFromReferrer(body.r || body.referrer || c.req.header("referer") || "");
   const device = deviceFromUa(ua);
   const host = (body.h || "").slice(0, 120);
+  const path = (body.p || body.path || "/").slice(0, 180);
+  const vid = typeof body.vid === "string" && body.vid.trim().length >= 8 ? body.vid.trim().slice(0, 64) : null;
+  const eventName = kind === "event" ? String(body.n || body.name || "event").slice(0, 80) : null;
+  const land = typeof body.land === "string" && body.land.trim() ? body.land.trim().slice(0, 180) : path;
+  const us = (body.us || "").slice(0, 80) || null;
+  const um = (body.um || "").slice(0, 80) || null;
+  const uc = (body.uc || "").slice(0, 80) || null;
   if (launch.site_url) {
     try {
       const allowed = new URL(launch.site_url).hostname.replace(/^www\./, "");
@@ -202,15 +250,48 @@ app.post("/t/:slug/collect", async (c) => {
       if (got && got !== allowed && got !== "localhost") return c.json({ error: "host_not_allowed" }, 403);
     } catch { /* site_url may be incomplete during setup */ }
   }
+  const now = Date.now();
+  if (!bot && vid) {
+    await c.env.DB.prepare(
+      `INSERT INTO visitors (id, launch_id, first_at, last_at, first_path, last_path, first_referrer, last_referrer, first_utm_source, first_utm_medium, first_utm_campaign, last_utm_source, last_utm_medium, last_utm_campaign, country, device)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(launch_id, id) DO UPDATE SET
+         last_at = excluded.last_at,
+         last_path = excluded.last_path,
+         last_referrer = excluded.last_referrer,
+         last_utm_source = excluded.last_utm_source,
+         last_utm_medium = excluded.last_utm_medium,
+         last_utm_campaign = excluded.last_utm_campaign,
+         country = COALESCE(excluded.country, visitors.country),
+         device = COALESCE(excluded.device, visitors.device)`,
+    ).bind(vid, launch.id, now, now, land, path, referrer, referrer, us, um, uc, us, um, uc, geo.country, device).run();
+  }
+  const hourTs = hourFloor(now);
+  let uniqueInc = 0;
+  if (!bot && kind === "pageview") {
+    const key = vid || visitor_hash;
+    const seen = key
+      ? await c.env.DB.prepare(
+        "SELECT 1 as n FROM events WHERE launch_id = ? AND created_at >= ? AND created_at < ? AND bot = 0 AND COALESCE(NULLIF(vid, ''), visitor_hash) = ? LIMIT 1",
+      ).bind(launch.id, hourTs, hourTs + 3_600_000, key).first()
+      : null;
+    uniqueInc = seen ? 0 : 1;
+  }
   await c.env.DB.prepare(
-    "INSERT INTO events (id, launch_id, kind, visitor_hash, country, city, lat, lng, path, amount_cents, created_at, referrer, device, utm_source, utm_medium, utm_campaign, host, bot) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  ).bind(randomId(), launch.id, kind, visitor_hash, geo.country, geo.city, geo.lat, geo.lng, (body.p || body.path || "/").slice(0, 180), amount, Date.now(), referrer, device, (body.us || "").slice(0, 80) || null, (body.um || "").slice(0, 80) || null, (body.uc || "").slice(0, 80) || null, host || null, bot).run();
-  return c.json({ ok: true, dropped: false });
+    "INSERT INTO events (id, launch_id, kind, visitor_hash, country, city, lat, lng, path, amount_cents, created_at, referrer, device, utm_source, utm_medium, utm_campaign, host, bot, vid, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).bind(randomId(), launch.id, kind, visitor_hash, geo.country, geo.city, geo.lat, geo.lng, path, amount, now, referrer, device, us, um, uc, host || null, bot, vid, eventName).run();
+  if (!bot) {
+    await bumpHour(c.env.DB, launch.id, hourTs, {
+      views: kind === "pageview" ? 1 : 0,
+      uniques: uniqueInc,
+      signups: kind === "signup" ? 1 : 0,
+    });
+  }
+  return c.json({ ok: true, dropped: false, unverified: kind === "payment" });
 });
 
 app.get("/embed.js", (c) => {
-  const origin = appOrigin(c);
-  const js = `(function(){var s=document.currentScript;if(!s)return;var slug=s.getAttribute("data-slug");if(!slug)return;var o="${origin}";var q=new URLSearchParams(location.search);function ping(t,extra){try{fetch(o+"/t/"+encodeURIComponent(slug)+"/collect",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(Object.assign({t:t,p:location.pathname,r:document.referrer||"",h:location.hostname,us:q.get("utm_source")||"",um:q.get("utm_medium")||"",uc:q.get("utm_campaign")||""},extra||{})),mode:"cors",keepalive:true,credentials:"omit"});}catch(e){}}ping("pageview");window.cairnSignup=window.whypaidSignup=window.launchmapSignup=function(){ping("signup")};})();`;
+  const js = embedScript(appOrigin(c));
   return new Response(js, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=300", "access-control-allow-origin": "*" } });
 });
 
@@ -255,8 +336,69 @@ app.post("/webhooks/dodo", async (c) => {
   try { event = JSON.parse(rawBody) as { type?: string; data?: Record<string, unknown> }; }
   catch { return c.json({ error: "Invalid JSON" }, 400); }
   await c.env.DB.prepare("INSERT INTO webhook_events (webhook_id, event_type, payload, processed_at) VALUES (?, ?, ?, ?)").bind(webhookId, event.type ?? "unknown", rawBody, Date.now()).run();
+  const type = (event.type ?? "").toLowerCase();
   if (event.type === "payment.succeeded") await onPaymentSucceeded(c.env.DB, event.data ?? {});
   if (event.type === "subscription.active") await onSubscriptionActive(c.env.DB, event.data ?? {});
+  if (type.includes("refund")) await onDodoRefund(c.env.DB, event.data ?? {});
+  return c.json({ received: true });
+});
+
+app.post("/webhooks/stripe", async (c) => {
+  const secret = c.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) return c.json({ error: "STRIPE_WEBHOOK_SECRET is not configured" }, 500);
+  const rawBody = await c.req.text();
+  const ok = await verifyStripeSignature(rawBody, c.req.header("stripe-signature"), secret);
+  if (!ok) return c.json({ error: "Invalid signature" }, 401);
+  let event: { id?: string; type?: string; data?: { object?: Record<string, unknown> } };
+  try { event = JSON.parse(rawBody) as { id?: string; type?: string; data?: { object?: Record<string, unknown> } }; }
+  catch { return c.json({ error: "Invalid JSON" }, 400); }
+  const eventId = event.id || "";
+  if (eventId) {
+    const existing = await c.env.DB.prepare("SELECT webhook_id FROM webhook_events WHERE webhook_id = ?").bind(eventId).first();
+    if (existing) return c.json({ received: true, duplicate: true });
+    await c.env.DB.prepare("INSERT INTO webhook_events (webhook_id, event_type, payload, processed_at) VALUES (?, ?, ?, ?)").bind(eventId, event.type ?? "unknown", rawBody, Date.now()).run();
+  }
+  const obj = asRecord(event.data?.object);
+  const meta = asRecord(obj.metadata);
+  const type = event.type ?? "";
+  if (type === "checkout.session.completed" || type === "payment_intent.succeeded") {
+    const launchId = await resolveLaunchId(c.env.DB, meta);
+    if (launchId) {
+      const vid = pickVid(meta, typeof obj.client_reference_id === "string" ? obj.client_reference_id : null);
+      const amount = type === "checkout.session.completed" ? num(obj.amount_total) : num(obj.amount);
+      const currency = typeof obj.currency === "string" ? obj.currency : "usd";
+      const external = (typeof obj.payment_intent === "string" ? obj.payment_intent : null) || (typeof obj.id === "string" ? obj.id : null);
+      await insertTrustedPayment(c.env.DB, {
+        launchId,
+        vid,
+        provider: "stripe",
+        amount_cents: amount,
+        kind: "one_time",
+        currency,
+        external_id: external,
+      });
+    }
+  } else if (type === "customer.subscription.created") {
+    const launchId = await resolveLaunchId(c.env.DB, meta);
+    if (launchId) {
+      const items = asRecord((obj.items as { data?: unknown[] } | undefined)?.data?.[0]);
+      const price = asRecord(items.price || items.plan);
+      const planObj = asRecord(obj.plan);
+      const amount = num(price.unit_amount ?? planObj.amount);
+      await insertTrustedPayment(c.env.DB, {
+        launchId,
+        vid: pickVid(meta),
+        provider: "stripe",
+        amount_cents: amount,
+        kind: "subscription",
+        currency: typeof obj.currency === "string" ? obj.currency : typeof price.currency === "string" ? price.currency : "usd",
+        external_id: typeof obj.id === "string" ? obj.id : null,
+      });
+    }
+  } else if (type === "charge.refunded") {
+    const ids = [typeof obj.id === "string" ? obj.id : "", typeof obj.payment_intent === "string" ? obj.payment_intent : ""].filter(Boolean);
+    await applyRefund(c.env.DB, "stripe", ids, num(obj.amount_refunded ?? obj.amount));
+  }
   return c.json({ received: true });
 });
 
@@ -264,65 +406,54 @@ async function onPaymentSucceeded(db: D1Database, data: Record<string, unknown>)
   const email = customerEmailFromDodoPayload(data);
   const paymentId = typeof data.payment_id === "string" ? data.payment_id : null;
   const customer = data.customer as { customer_id?: string } | undefined;
-  const metadata = (data.metadata ?? {}) as { user_id?: string; email?: string; plan?: string; launch_id?: string };
+  const metadata = asRecord(data.metadata);
   const amount = typeof data.total_amount === "number" ? data.total_amount : typeof data.amount === "number" ? data.amount : 0;
-  const now = Date.now();
-  let userId = metadata.user_id;
+  let userId = typeof metadata.user_id === "string" ? metadata.user_id : undefined;
   if (!userId) {
-    const target = email ?? metadata.email?.toLowerCase();
-    if (!target) return;
-    const user = await findOrCreateUser(db, target);
-    userId = user.id;
+    const target = email ?? (typeof metadata.email === "string" ? metadata.email.toLowerCase() : undefined);
+    if (target) {
+      const user = await findOrCreateUser(db, target);
+      userId = user.id;
+    }
   }
-  await db.prepare("UPDATE users SET watermark = 0, dodo_customer_id = COALESCE(?, dodo_customer_id), dodo_payment_id = COALESCE(?, dodo_payment_id) WHERE id = ?").bind(customer?.customer_id ?? null, paymentId, userId).run();
-  if (metadata.launch_id && amount > 0) {
-    await db.prepare("INSERT INTO events (id, launch_id, kind, visitor_hash, country, city, lat, lng, path, amount_cents, created_at) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)").bind(randomId(), metadata.launch_id, "payment", "dodo", amount, now).run();
+  if (userId) {
+    await db.prepare("UPDATE users SET watermark = 0, dodo_customer_id = COALESCE(?, dodo_customer_id), dodo_payment_id = COALESCE(?, dodo_payment_id) WHERE id = ?").bind(customer?.customer_id ?? null, paymentId, userId).run();
   }
+  const vid = pickVid(metadata);
+  const launchId = vid ? await resolveLaunchId(db, metadata) : null;
+  if (launchId && vid) {
+    await insertTrustedPayment(db, {
+      launchId,
+      vid,
+      provider: "dodo",
+      amount_cents: amount,
+      kind: "one_time",
+      currency: typeof data.currency === "string" ? data.currency : "usd",
+      external_id: paymentId,
+    });
+  }
+}
+
+async function onDodoRefund(db: D1Database, data: Record<string, unknown>): Promise<void> {
+  const paymentId = typeof data.payment_id === "string" ? data.payment_id : typeof data.id === "string" ? data.id : "";
+  const amount = num(data.total_amount ?? data.amount);
+  await applyRefund(db, "dodo", [paymentId], amount);
 }
 
 async function onSubscriptionActive(db: D1Database, data: Record<string, unknown>): Promise<void> {
   const email = customerEmailFromDodoPayload(data);
   const customer = data.customer as { customer_id?: string } | undefined;
-  const metadata = (data.metadata ?? {}) as { user_id?: string; email?: string; plan?: string };
+  const metadata = asRecord(data.metadata);
   const subId = typeof data.subscription_id === "string" ? data.subscription_id : null;
   const plan = metadata.plan === "business" ? "business" : "pro";
-  let userId = metadata.user_id;
+  let userId = typeof metadata.user_id === "string" ? metadata.user_id : undefined;
   if (!userId) {
-    const target = email ?? metadata.email?.toLowerCase();
+    const target = email ?? (typeof metadata.email === "string" ? metadata.email.toLowerCase() : undefined);
     if (!target) return;
     userId = (await findOrCreateUser(db, target)).id;
   }
   await db.prepare("UPDATE users SET plan = ?, plan_status = ?, watermark = 0, dodo_customer_id = COALESCE(?, dodo_customer_id), dodo_subscription_id = COALESCE(?, dodo_subscription_id) WHERE id = ?").bind(plan, "active", customer?.customer_id ?? null, subId, userId).run();
 }
-
-type LaunchRow = { id: string; name: string; slug: string; site_url: string | null; manual_revenue_cents: number; created_at: number };
-
-async function loadBoard(db: D1Database, launch: LaunchRow, since = 0) {
-  const views = await db.prepare("SELECT COUNT(*) as n FROM events WHERE launch_id = ? AND bot = 0 AND created_at >= ? AND kind = ?").bind(launch.id, since, "pageview").first<{ n: number }>();
-  const uniques = await db.prepare("SELECT COUNT(DISTINCT visitor_hash) as n FROM events WHERE launch_id = ? AND bot = 0 AND created_at >= ? AND kind = ?").bind(launch.id, since, "pageview").first<{ n: number }>();
-  const signups = await db.prepare("SELECT COUNT(*) as n FROM events WHERE launch_id = ? AND bot = 0 AND created_at >= ? AND kind = ?").bind(launch.id, since, "signup").first<{ n: number }>();
-  const paid = await db.prepare("SELECT COALESCE(SUM(amount_cents), 0) as n FROM events WHERE launch_id = ? AND bot = 0 AND created_at >= ? AND kind = ?").bind(launch.id, since, "payment").first<{ n: number }>();
-  const { results } = await db.prepare("SELECT id, kind, country, city, lat, lng, path, amount_cents, created_at, referrer FROM events WHERE launch_id = ? AND bot = 0 AND created_at >= ? ORDER BY created_at DESC LIMIT 40").bind(launch.id, since).all<VisitorHit>();
-  const pages = (await db.prepare("SELECT path, COUNT(*) as views FROM events WHERE launch_id = ? AND bot = 0 AND created_at >= ? AND kind = 'pageview' GROUP BY path ORDER BY views DESC LIMIT 8").bind(launch.id, since).all< { path: string; views: number }>()).results ?? [];
-  const countries = (await db.prepare("SELECT country, COUNT(DISTINCT visitor_hash) as visitors FROM events WHERE launch_id = ? AND bot = 0 AND created_at >= ? AND country IS NOT NULL GROUP BY country ORDER BY visitors DESC LIMIT 8").bind(launch.id, since).all<{ country: string; visitors: number }>()).results ?? [];
-  const sourceRows = (await db.prepare("SELECT COALESCE(referrer, 'Direct') as name, COUNT(DISTINCT visitor_hash) as visitors, COALESCE(SUM(CASE WHEN kind = 'payment' THEN amount_cents ELSE 0 END), 0) as revenue_cents FROM events WHERE launch_id = ? AND bot = 0 AND created_at >= ? GROUP BY COALESCE(referrer, 'Direct') ORDER BY visitors DESC LIMIT 8").bind(launch.id, since).all<{ name: string; visitors: number; revenue_cents: number }>()).results ?? [];
-  const aiNames = new Set(["ChatGPT", "Perplexity", "Claude", "Gemini"]);
-  const sources = sourceRows.filter((s) => !aiNames.has(s.name));
-  const ai = sourceRows.filter((s) => aiNames.has(s.name));
-  return {
-    launch: { name: launch.name, slug: launch.slug, site_url: launch.site_url },
-    stats: {
-      views: views?.n ?? 0,
-      unique: uniques?.n ?? 0,
-      signups: signups?.n ?? 0,
-      revenue_cents: (launch.manual_revenue_cents ?? 0) + (paid?.n ?? 0),
-    },
-    visitors: results ?? [],
-    sources, pages, countries, ai, search: [],
-  };
-}
-
-type VisitorHit = { id: string; kind: string; country: string | null; city: string | null; lat: number | null; lng: number | null; path: string | null; amount_cents: number; created_at: number; referrer?: string | null };
 
 function channelFromReferrer(raw: string): string {
   if (!raw) return "Direct";
@@ -367,8 +498,22 @@ function demoBoard() {
   const payments = 1 + Math.floor(tick / 400);
   const visitors = Array.from({ length: 12 }, (_, i) => {
     const city = cities[(tick + i * 3) % cities.length];
-    const kind = i === 0 && tick % 22 === 0 ? "payment" : i % 5 === 0 ? "signup" : "pageview";
-    return { id: `demo-${tick}-${i}`, kind, country: city.country, city: city.city, lat: city.lat, lng: city.lng, path: i % 2 ? "/" : "/pricing", amount_cents: kind === "payment" ? 1900 : 0, created_at: now - i * 2100 };
+    const kind = i === 0 && tick % 22 === 0 ? "payment" : i % 5 === 0 ? "signup" : i % 3 === 0 ? "event" : "pageview";
+    return {
+      id: `demo-${tick}-${i}`,
+      vid: `demo-vid-${(tick + i) % 9}`,
+      kind,
+      name: kind === "event" ? "pricing_click" : kind === "payment" ? "payment" : null,
+      country: city.country,
+      city: city.city,
+      lat: city.lat,
+      lng: city.lng,
+      path: i % 2 ? "/" : "/pricing",
+      referrer: i % 3 === 0 ? "Twitter / X" : i % 3 === 1 ? "Google" : "Direct",
+      amount_cents: kind === "payment" ? 1900 : 0,
+      created_at: now - i * 2100,
+      unverified: false,
+    };
   });
   const revenue = payments * 1900;
   const sources = [
@@ -390,22 +535,39 @@ function demoBoard() {
     { country: "DE", visitors: Math.floor(unique * 0.1) },
     { country: "BR", visitors: Math.floor(unique * 0.08) },
   ];
-  const search = [
-    { query: "acme analytics alternative", clicks: 42 + Math.floor(tick / 40) },
-    { query: "launch week tracker", clicks: 31 + Math.floor(tick / 55) },
-    { query: "acme vs plausible", clicks: 18 + Math.floor(tick / 70) },
-  ];
   const ai = [
     { name: "ChatGPT", visitors: Math.floor(unique * 0.08), revenue_cents: Math.floor(revenue * 0.09) },
     { name: "Perplexity", visitors: Math.floor(unique * 0.03), revenue_cents: Math.floor(revenue * 0.03) },
     { name: "Claude", visitors: Math.floor(unique * 0.01), revenue_cents: Math.floor(revenue * 0.01) },
   ];
+  const series = Array.from({ length: 24 }, (_, i) => {
+    const hour_ts = hourFloor(now) - (23 - i) * 3_600_000;
+    const wave = ((tick + i * 7) % 40);
+    return {
+      hour_ts,
+      views: 28 + wave + (i % 5) * 3,
+      uniques: 9 + Math.floor(wave / 3),
+      signups: i % 6 === 0 ? 2 : i % 3 === 0 ? 1 : 0,
+      revenue_cents: i % 5 === 0 ? 1900 : 0,
+    };
+  });
   return {
     launch: { name: "Acme launch week", slug: "demo", site_url: "https://example.com" },
-    stats: { views, unique, signups, revenue_cents: revenue },
+    stats: { views, unique, signups, revenue_cents: revenue, customers: payments, rpv: unique ? revenue / unique : 0 },
     visitors,
-    sources, pages, countries, search, ai,
-    watermark: false, demo: true,
+    sources,
+    sources_last: sources.map((s) => ({ ...s, revenue_cents: Math.floor(s.revenue_cents * 0.85) })),
+    pages, countries, search: [], ai, series,
+    funnel: [
+      { name: "Land", count: unique },
+      { name: "Pricing", count: Math.floor(unique * 0.42) },
+      { name: "Checkout", count: Math.floor(unique * 0.11) },
+      { name: "Paid", count: payments },
+    ],
+    touch: "first",
+    live: true,
+    watermark: false,
+    demo: true,
   };
 }
 
@@ -445,12 +607,15 @@ function appOrigin(c: { env: Env; req: { url: string } }): string {
   return new URL(c.req.url).origin;
 }
 
-
 function rangeSince(range: string | undefined, plan: string | undefined): number {
   const now = Date.now();
-  const cap = retentionMs(plan === "monthly" ? "monthly" : "free");
+  const cap = retentionMs(plan ?? "free");
   const ms = range === "24h" ? 86400000 : range === "7d" ? 86400000 * 7 : 86400000 * 30;
   return now - Math.min(ms, cap);
+}
+
+function touchFromQuery(value: string | undefined): "first" | "last" {
+  return value === "last" ? "last" : "first";
 }
 
 function slugify(value: string): string {
@@ -463,4 +628,3 @@ export default {
     ctx.waitUntil(purgeExpiredEvents(env.DB));
   },
 };
-

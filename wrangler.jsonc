@@ -11,6 +11,7 @@
       "/api/*",
       "/auth/verify",
       "/webhooks/dodo",
+      "/webhooks/stripe",
       "/t/*",
       "/embed.js"
     ]

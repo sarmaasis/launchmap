@@ -20,3 +20,6 @@ GOOGLE_CLIENT_SECRET=
 # GitHub OAuth App. Callback: $APP_URL/api/auth/github/callback
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
+
+# Stripe (customer-site checkout webhooks). Omit to disable /webhooks/stripe.
+STRIPE_WEBHOOK_SECRET=

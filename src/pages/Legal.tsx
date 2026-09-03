@@ -5,8 +5,8 @@ const PAGES: Record<string, { title: string; body: string[] }> = {
     title: "Privacy",
     body: [
       "Cairn is the data controller for your account email. For visitor analytics, you (the site owner) are the controller. We are the processor.",
-      "The tracker is cookieless. It does not set a tracking cookie. Visitor ids rotate every UTC day from IP, user agent, and a server pepper. That is enough to count uniques for one day, not to follow a person across weeks.",
-      "We store page path, classified referrer, coarse Cloudflare country, device class, optional UTM tags, event kind, and payment amounts you send or that Dodo posts to us. We do not store names, emails, or IP addresses of your visitors.",
+      "The tracker does not set a tracking cookie. It stores a random first-party id in localStorage (cairn_vid) so a payment can be joined to a visit. A daily hash of IP, user agent, and a server pepper is used only to jitter map pins.",
+      "We store page path, classified referrer, coarse Cloudflare country, device class, optional UTM tags, event kind, the first-party visitor id, and payment amounts from Dodo or Stripe webhooks. Client payment pings are unverified until a webhook row exists. We do not store names, emails, or IP addresses of your visitors.",
       "Trial accounts keep events 14 days. Pro and Business keep events 3 years. Webhook payloads are dropped after 30 days. Magic links expire in 15 minutes.",
       "Export your data at any time from the app (JSON). Erase your account and all events from the same screen. Email sarmaasis@gmail.com for a human request. We use Cloudflare (Workers, D1, Email Sending) and Dodo Payments as processors.",
     ],
@@ -25,8 +25,8 @@ const PAGES: Record<string, { title: string; body: string[] }> = {
     body: [
       "This DPA applies when you (controller) send visitor events to Cairn (processor) to provide analytics.",
       "Subject matter: web analytics events. Duration: while your account exists, then until retention or erasure completes. Nature: collect, store, aggregate, display, delete.",
-      "Types of data: hashed daily visitor id, path, referrer class, country, device class, UTM, event kind, amount. No special categories. Data subjects: visitors to your sites.",
-      "We follow your instructions: process events for dashboards, export on request, erase on request or when retention ends. Subprocessors: Cloudflare, Inc. (compute and database, country of processing depends on the request), Dodo Payments (billing for your subscription, not visitor events).",
+      "Types of data: first-party visitor id, hashed daily id for map jitter, path, referrer class, country, device class, UTM, event kind, payment amounts. No special categories. Data subjects: visitors to your sites.",
+      "We follow your instructions: process events for dashboards, export on request, erase on request or when retention ends. Subprocessors: Cloudflare, Inc. (compute and database, country of processing depends on the request), Dodo Payments (billing for your Cairn subscription), Stripe (only if you send their webhooks for your own checkouts).",
       "We assist with data subject requests that reach us, keep events in D1 with access limited to the service, and notify you without undue delay if we become aware of a personal data breach affecting your events.",
       "On account erasure we delete events, boards, sessions, and login tokens. Aggregated demo data on the marketing site is synthetic and not your visitors.",
     ],
