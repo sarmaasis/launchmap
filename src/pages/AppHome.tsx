@@ -18,6 +18,10 @@ export default function AppHome() {
   const [board, setBoard] = useState<BoardData | null>(null);
   const [copied, setCopied] = useState(false);
   const [panel, setPanel] = useState<"board" | "install" | "plan">("board");
+  const [bingKey, setBingKey] = useState("");
+  const [conn, setConn] = useState<{ gsc: { connected: boolean; site_url: string | null }; bing: { connected: boolean; site_url: string | null } } | null>(null);
+  const [keys, setKeys] = useState<Array<{ id: string; name: string; prefix: string; created_at: number }>>([]);
+  const [newKey, setNewKey] = useState<string | null>(null);
 
   async function load() {
     const me = await fetch("/api/me");
@@ -47,6 +51,25 @@ export default function AppHome() {
     const id = setInterval(tick, 4000);
     return () => { alive = false; clearInterval(id); };
   }, [picked?.id, range, touch]);
+
+  useEffect(() => {
+    if (!picked) { setConn(null); return; }
+    let alive = true;
+    fetch(`/api/launches/${picked.id}/connections`).then(async (res) => {
+      if (!res.ok || !alive) return;
+      setConn(await res.json());
+    });
+    return () => { alive = false; };
+  }, [picked?.id, panel]);
+
+  useEffect(() => {
+    if (panel !== "plan") return;
+    fetch("/api/keys").then(async (res) => {
+      if (!res.ok) return;
+      const data = await res.json() as { keys: Array<{ id: string; name: string; prefix: string; created_at: number }> };
+      setKeys(data.keys);
+    });
+  }, [panel]);
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
@@ -117,8 +140,14 @@ export default function AppHome() {
           <section className="onboard">
             <p className="kicker">Install</p>
             <h1>One line in the head</h1>
-            <p className="lede">Paste once on {picked.site_url || "your site"}. Call <code>window.cairnSignup()</code> on signup, <code>window.cairnEvent('pricing_click')</code> for custom events, and pass the visitor through checkout with <code>window.cairnCheckoutUrl(url)</code> or <code>data-cairn-checkout</code> on the link. Client <code>window.cairnPay(cents)</code> shows on the feed as unverified until a Dodo or Stripe webhook joins the same visitor id.</p>
+            <p className="lede">Paste once on {picked.site_url || "your site"}. Call <code>window.cairnSignup()</code> on signup, <code>window.cairnEvent('pricing_click')</code> for custom events, and pass the visitor through checkout with <code>window.cairnCheckoutUrl(url)</code> or <code>data-cairn-checkout</code> on the link. Put that visitor id in checkout metadata as <code>cairn_vid</code> (also accepted: <code>vid</code>, plus <code>launch_id</code> or <code>slug</code>). Client <code>window.cairnPay(cents)</code> shows on the feed as unverified until a webhook joins the same visitor id.</p>
             <pre className="snippet">{snippet}</pre>
+            <p className="lede">Webhook URLs for your checkout provider (verify with the matching secret):</p>
+            <pre className="snippet">{`${origin}/webhooks/dodo
+${origin}/webhooks/stripe
+${origin}/webhooks/polar
+${origin}/webhooks/paddle
+${origin}/webhooks/lemon`}</pre>
             <div className="hero-actions">
               <button className="btn" type="button" onClick={() => { navigator.clipboard.writeText(snippet); setCopied(true); }}> {copied ? "Copied" : "Copy snippet"}</button>
               <button className="btn ghost" type="button" onClick={() => setPanel("board")}>Open dashboard</button>
@@ -142,6 +171,47 @@ export default function AppHome() {
             <div className="hero-actions">
               <input value={rev} onChange={(e) => setRev(e.target.value)} style={{ maxWidth: 120 }} />
               <button className="btn ghost" type="button" onClick={saveRevenue}>Save</button>
+            </div>
+            {picked ? (
+              <div className="card" style={{ marginTop: 18 }}>
+                <h3>Search</h3>
+                <p className="lede">Search Console: {conn?.gsc.connected ? `connected${conn.gsc.site_url ? ` (${conn.gsc.site_url})` : ""}` : "not connected"}.</p>
+                <p className="lede">Bing: {conn?.bing.connected ? `connected${conn.bing.site_url ? ` (${conn.bing.site_url})` : ""}` : "not connected"}.</p>
+                <div className="hero-actions">
+                  <button className="btn" type="button" onClick={() => { window.location.href = `/api/connect/gsc?launch_id=${picked.id}`; }}>Connect Search Console</button>
+                  {conn?.gsc.connected ? <button className="btn ghost" type="button" onClick={async () => { await fetch(`/api/launches/${picked.id}/connect/gsc`, { method: "DELETE" }); setConn(await (await fetch(`/api/launches/${picked.id}/connections`)).json()); }}>Disconnect GSC</button> : null}
+                </div>
+                <form className="form onboard-form" onSubmit={async (e) => {
+                  e.preventDefault();
+                  const res = await fetch(`/api/launches/${picked.id}/connect/bing`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ api_key: bingKey, site_url: picked.site_url }) });
+                  const data = await res.json() as { error?: string; connections?: typeof conn };
+                  if (!res.ok) { setErr(data.error ?? "Could not save Bing key"); return; }
+                  setBingKey("");
+                  if (data.connections) setConn(data.connections);
+                }}>
+                  <label>Bing Webmaster API key</label>
+                  <input value={bingKey} onChange={(e) => setBingKey(e.target.value)} placeholder="Bing API key" />
+                  <button className="btn ghost" type="submit">Save Bing key</button>
+                </form>
+                {conn?.bing.connected ? <button className="btn ghost" type="button" onClick={async () => { await fetch(`/api/launches/${picked.id}/connect/bing`, { method: "DELETE" }); setConn(await (await fetch(`/api/launches/${picked.id}/connections`)).json()); }}>Disconnect Bing</button> : null}
+                <button className="btn ghost" type="button" onClick={async () => { await fetch(`/api/launches/${picked.id}/search/sync`, { method: "POST" }); }}>Sync search now</button>
+              </div>
+            ) : null}
+            <div className="card" style={{ marginTop: 18 }}>
+              <h3>API keys</h3>
+              <p className="lede">For the CLI and MCP. The secret is shown once.</p>
+              {keys.map((k) => (
+                <p className="fine" key={k.id}>{k.name} · {k.prefix}… <button className="btn ghost" type="button" onClick={async () => { await fetch(`/api/keys/${k.id}`, { method: "DELETE" }); setKeys(keys.filter((x) => x.id !== k.id)); }}>Revoke</button></p>
+              ))}
+              {newKey ? <pre className="snippet">{newKey}</pre> : null}
+              <button className="btn ghost" type="button" onClick={async () => {
+                const res = await fetch("/api/keys", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "CLI" }) });
+                const data = await res.json() as { key?: { secret: string; id: string; name: string; prefix: string; created_at: number } };
+                if (data.key) {
+                  setNewKey(data.key.secret);
+                  setKeys([{ id: data.key.id, name: data.key.name, prefix: data.key.prefix, created_at: data.key.created_at }, ...keys]);
+                }
+              }}>Create API key</button>
             </div>
             {err ? <p className="err">{err}</p> : null}
             <DataRights setErr={setErr} />

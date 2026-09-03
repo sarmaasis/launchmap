@@ -26,10 +26,14 @@ export async function eraseUser(db: D1Database, userId: string, email: string) {
     await db.prepare("DELETE FROM hour_buckets WHERE launch_id = ?").bind(row.id).run();
     await db.prepare("DELETE FROM launch_modes WHERE launch_id = ?").bind(row.id).run();
     await db.prepare("DELETE FROM goals WHERE launch_id = ?").bind(row.id).run();
+    await db.prepare("DELETE FROM search_queries WHERE launch_id = ?").bind(row.id).run();
+    await db.prepare("DELETE FROM connections WHERE launch_id = ?").bind(row.id).run();
   }
   await db.prepare("DELETE FROM launches WHERE user_id = ?").bind(userId).run();
   await db.prepare("DELETE FROM sessions WHERE user_id = ?").bind(userId).run();
   await db.prepare("DELETE FROM magic_links WHERE user_id = ?").bind(userId).run();
+  await db.prepare("DELETE FROM connections WHERE user_id = ?").bind(userId).run();
+  await db.prepare("DELETE FROM api_keys WHERE user_id = ?").bind(userId).run();
   await db.prepare("DELETE FROM users WHERE id = ?").bind(userId).run();
   await db.prepare("INSERT INTO deletion_requests (id, user_id, email, requested_at, completed_at, note) VALUES (?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), userId, email, Date.now(), Date.now(), "account_erased").run();
 }
@@ -40,5 +44,8 @@ export async function exportAccount(db: D1Database, userId: string) {
   const events = (await db.prepare("SELECT events.id, events.kind, events.name, events.vid, events.country, events.city, events.path, events.referrer, events.device, events.utm_source, events.utm_medium, events.utm_campaign, events.amount_cents, events.created_at, events.bot FROM events JOIN launches ON launches.id = events.launch_id WHERE launches.user_id = ? ORDER BY events.created_at DESC LIMIT 20000").bind(userId).all()).results ?? [];
   const visitors = (await db.prepare("SELECT visitors.* FROM visitors JOIN launches ON launches.id = visitors.launch_id WHERE launches.user_id = ? LIMIT 20000").bind(userId).all()).results ?? [];
   const payments = (await db.prepare("SELECT payments.id, payments.launch_id, payments.vid, payments.provider, payments.amount_cents, payments.refunded_cents, payments.kind, payments.currency, payments.created_at FROM payments JOIN launches ON launches.id = payments.launch_id WHERE launches.user_id = ? LIMIT 20000").bind(userId).all()).results ?? [];
-  return { exported_at: new Date().toISOString(), controller: "Cairn", user, launches, events, visitors, payments };
+  const search = (await db.prepare("SELECT search_queries.* FROM search_queries JOIN launches ON launches.id = search_queries.launch_id WHERE launches.user_id = ? LIMIT 20000").bind(userId).all()).results ?? [];
+  const connections = (await db.prepare("SELECT id, launch_id, kind, site_url, created_at, updated_at FROM connections WHERE user_id = ?").bind(userId).all()).results ?? [];
+  const api_keys = (await db.prepare("SELECT id, name, prefix, created_at, last_used_at FROM api_keys WHERE user_id = ?").bind(userId).all()).results ?? [];
+  return { exported_at: new Date().toISOString(), controller: "Cairn", user, launches, events, visitors, payments, search, connections, api_keys };
 }

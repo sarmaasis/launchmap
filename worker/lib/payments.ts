@@ -1,4 +1,4 @@
-import { randomId, timingSafeEqual } from "./crypto";
+import { hmacSha256, randomId, timingSafeEqual } from "./crypto";
 
 export function hourFloor(ts: number): number {
   return Math.floor(ts / 3_600_000) * 3_600_000;
@@ -157,4 +157,91 @@ export function asRecord(value: unknown): Record<string, unknown> {
 
 export function num(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : typeof value === "string" ? Number(value) || 0 : 0;
+}
+
+export async function hmacHex(secret: string, message: string): Promise<string> {
+  const mac = await hmacSha256(new TextEncoder().encode(secret), message);
+  return [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export async function hmacBytes(secret: string, message: string): Promise<Uint8Array> {
+  return new Uint8Array(await hmacSha256(new TextEncoder().encode(secret), message));
+}
+
+function bytesFromHex(hex: string): Uint8Array | null {
+  const clean = hex.trim().toLowerCase();
+  if (!clean || clean.length % 2) return null;
+  if (!/^[0-9a-f]+$/.test(clean)) return null;
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function bytesFromB64(value: string): Uint8Array | null {
+  try {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - (padded.length % 4));
+    const binary = atob(padded + pad);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+export async function signaturesMatch(got: Uint8Array, header: string): Promise<boolean> {
+  const candidates = [bytesFromHex(header), bytesFromB64(header)].filter(Boolean) as Uint8Array[];
+  const utf = new TextEncoder().encode(header.trim());
+  candidates.push(utf);
+  for (const want of candidates) {
+    if (want.length === got.length && timingSafeEqual(got, want)) return true;
+  }
+  const hexGot = [...got].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const a = new TextEncoder().encode(hexGot);
+  const b = new TextEncoder().encode(header.trim().toLowerCase());
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** Paddle-Signature: ts=<unix>;h1=<hex> HMAC-SHA256 of `${ts}:${rawBody}`. */
+export async function verifyPaddleSignature(rawBody: string, header: string | null | undefined, secret: string): Promise<boolean> {
+  if (!header) return false;
+  const parts: Record<string, string[]> = {};
+  for (const piece of header.split(";")) {
+    const eq = piece.indexOf("=");
+    if (eq < 0) continue;
+    const k = piece.slice(0, eq).trim();
+    const v = piece.slice(eq + 1).trim();
+    (parts[k] ||= []).push(v);
+  }
+  const t = parts.ts?.[0];
+  const h1 = parts.h1 ?? [];
+  if (!t || !h1.length) return false;
+  const age = Math.abs(Date.now() / 1000 - Number(t));
+  if (!Number.isFinite(Number(t)) || age > 60 * 5) return false;
+  const got = await hmacBytes(secret, `${t}:${rawBody}`);
+  for (const candidate of h1) {
+    if (await signaturesMatch(got, candidate)) return true;
+  }
+  return false;
+}
+
+/** Lemon Squeezy X-Signature: HMAC-SHA256 hex of the raw body. */
+export async function verifyLemonSignature(rawBody: string, header: string | null | undefined, secret: string): Promise<boolean> {
+  if (!header) return false;
+  const got = await hmacBytes(secret, rawBody);
+  return signaturesMatch(got, header);
+}
+
+export function collectMeta(...objs: unknown[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const obj of objs) {
+    const rec = asRecord(obj);
+    Object.assign(out, rec);
+    Object.assign(out, asRecord(rec.metadata));
+    Object.assign(out, asRecord(rec.custom_data));
+    Object.assign(out, asRecord(asRecord(rec.checkout).metadata));
+    Object.assign(out, asRecord(asRecord(rec.order).metadata));
+  }
+  return out;
 }

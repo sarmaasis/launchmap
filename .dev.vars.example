@@ -23,3 +23,14 @@ GITHUB_CLIENT_SECRET=
 
 # Stripe (customer-site checkout webhooks). Omit to disable /webhooks/stripe.
 STRIPE_WEBHOOK_SECRET=
+
+# Search Console uses the same Google client as login, but a separate OAuth flow.
+# Add this redirect URI on the Google Cloud OAuth client:
+#   $APP_URL/api/connect/gsc/callback
+# Login remains $APP_URL/api/auth/google/callback
+# Scope: https://www.googleapis.com/auth/webmasters.readonly plus openid email.
+
+# Polar / Paddle / Lemon Squeezy (customer-site checkout webhooks). Omit a secret to disable that path (returns 500).
+POLAR_WEBHOOK_SECRET=
+PADDLE_WEBHOOK_SECRET=
+LEMON_SQUEEZY_WEBHOOK_SECRET=

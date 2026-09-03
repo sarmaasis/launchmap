@@ -5,6 +5,9 @@
   "description": "Hosted launch boards. Paste a script, tweet a public URL, watch visitors and the first dollar.",
   "type": "module",
   "license": "MIT",
+  "bin": {
+    "cairn": "./cli/cairn.mjs"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

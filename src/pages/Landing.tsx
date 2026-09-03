@@ -30,7 +30,7 @@ export default function Landing() {
       <header className="mast wrap">
         <p className="kicker">Revenue analytics</p>
         <h1>Which visit paid?</h1>
-        <p className="lede mast-lede">A payment hits the board next to the visit that earned it. Cairn joins them with a first-party visitor id and checkout metadata. Webhooks live today: Dodo and Stripe.</p>
+        <p className="lede mast-lede">A payment hits the board next to the visit that earned it. Cairn joins them with a first-party visitor id and checkout metadata. Search Console, Bing, Stripe, Dodo, Polar, Paddle, and Lemon Squeezy webhooks plus an API for CLI and MCP exist; they need keys or OAuth before anything shows up.</p>
         <div className="hero-actions">
           <button className="btn" type="button" onClick={() => go("/login")}>Start trial</button>
           <a className="text-link" href="#product">See the board</a>

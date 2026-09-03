@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import {
   canCreateLaunch,
@@ -34,6 +34,26 @@ import {
   resolveLaunchId,
   verifyStripeSignature,
 } from "./lib/payments";
+import {
+  connectionStatus,
+  deleteConnection,
+  finishGscOAuth,
+  listSearchRows,
+  startGscOAuth,
+  syncAllSearch,
+  syncBing,
+  syncGsc,
+  upsertBingConnection,
+} from "./lib/search";
+import { createApiKey, deleteApiKey, getBearerUser, listApiKeys } from "./lib/apikeys";
+import {
+  handleLemonEvent,
+  handlePaddleEvent,
+  handlePolarEvent,
+  verifyLemonSignature,
+  verifyPaddleSignature,
+  verifyPolarWebhook,
+} from "./lib/provider-webhooks";
 
 type App = { Bindings: Env };
 const app = new Hono<App>();
@@ -179,6 +199,164 @@ app.patch("/api/launches/:id", async (c) => {
     ).bind(c.req.param("id"), live, now, live ? null : now).run();
   }
   return c.json({ ok: true });
+});
+
+
+app.get("/api/connect/gsc", async (c) => {
+  const user = await getSessionUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const launchId = (c.req.query("launch_id") ?? "").trim();
+  if (!launchId) return c.json({ error: "launch_id is required" }, 400);
+  const launch = await c.env.DB.prepare("SELECT id FROM launches WHERE id = ? AND user_id = ?").bind(launchId, user.id).first();
+  if (!launch) return c.json({ error: "Not found" }, 404);
+  return startGscOAuth(c, appOrigin(c), launchId, user.id);
+});
+app.get("/api/connect/gsc/callback", (c) => finishGscOAuth(c, appOrigin(c)));
+
+app.post("/api/launches/:id/connect/bing", async (c) => {
+  const user = await getSessionUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const launch = await c.env.DB.prepare(
+    "SELECT id, name, slug, site_url, manual_revenue_cents, created_at FROM launches WHERE id = ? AND user_id = ?",
+  ).bind(c.req.param("id"), user.id).first<LaunchRow>();
+  if (!launch) return c.json({ error: "Not found" }, 404);
+  const body = await c.req.json().catch(() => ({})) as { api_key?: string; site_url?: string };
+  const apiKey = (body.api_key ?? "").trim();
+  if (!apiKey) return c.json({ error: "api_key is required" }, 400);
+  const siteUrl = (body.site_url ?? launch.site_url ?? "").trim() || null;
+  await upsertBingConnection(c.env.DB, user.id, launch.id, apiKey, siteUrl);
+  try { await syncBing(c.env, launch); } catch (err) { console.error("bing sync after connect failed", err); }
+  return c.json({ ok: true, connections: await connectionStatus(c.env.DB, launch.id) });
+});
+
+app.delete("/api/launches/:id/connect/gsc", async (c) => {
+  const user = await getSessionUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const launch = await c.env.DB.prepare("SELECT id FROM launches WHERE id = ? AND user_id = ?").bind(c.req.param("id"), user.id).first();
+  if (!launch) return c.json({ error: "Not found" }, 404);
+  await deleteConnection(c.env.DB, c.req.param("id"), "gsc");
+  return c.json({ ok: true });
+});
+
+app.delete("/api/launches/:id/connect/bing", async (c) => {
+  const user = await getSessionUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const launch = await c.env.DB.prepare("SELECT id FROM launches WHERE id = ? AND user_id = ?").bind(c.req.param("id"), user.id).first();
+  if (!launch) return c.json({ error: "Not found" }, 404);
+  await deleteConnection(c.env.DB, c.req.param("id"), "bing");
+  return c.json({ ok: true });
+});
+
+app.get("/api/launches/:id/connections", async (c) => {
+  const user = await getSessionUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const launch = await c.env.DB.prepare("SELECT id FROM launches WHERE id = ? AND user_id = ?").bind(c.req.param("id"), user.id).first();
+  if (!launch) return c.json({ error: "Not found" }, 404);
+  return c.json(await connectionStatus(c.env.DB, c.req.param("id")));
+});
+
+app.get("/api/launches/:id/search", async (c) => {
+  const user = await getSessionUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const launch = await c.env.DB.prepare("SELECT id FROM launches WHERE id = ? AND user_id = ?").bind(c.req.param("id"), user.id).first();
+  if (!launch) return c.json({ error: "Not found" }, 404);
+  return c.json(await listSearchRows(c.env.DB, c.req.param("id")));
+});
+
+app.post("/api/launches/:id/search/sync", async (c) => {
+  const user = await getSessionUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const launch = await c.env.DB.prepare(
+    "SELECT id, name, slug, site_url, manual_revenue_cents, created_at FROM launches WHERE id = ? AND user_id = ?",
+  ).bind(c.req.param("id"), user.id).first<LaunchRow>();
+  if (!launch) return c.json({ error: "Not found" }, 404);
+  await syncGsc(c.env, launch);
+  await syncBing(c.env, launch);
+  return c.json({ ok: true, search: await listSearchRows(c.env.DB, launch.id) });
+});
+
+app.post("/api/keys", async (c) => {
+  const user = await getSessionUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const body = await c.req.json().catch(() => ({})) as { name?: string };
+  const name = (body.name ?? "CLI").trim() || "CLI";
+  const key = await createApiKey(c.env.DB, c.env.SESSION_SECRET, user.id, name);
+  return c.json({ key }, 201);
+});
+
+app.get("/api/keys", async (c) => {
+  const user = await getSessionUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  return c.json({ keys: await listApiKeys(c.env.DB, user.id) });
+});
+
+app.delete("/api/keys/:id", async (c) => {
+  const user = await getSessionUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const ok = await deleteApiKey(c.env.DB, user.id, c.req.param("id"));
+  if (!ok) return c.json({ error: "Not found" }, 404);
+  return c.json({ ok: true });
+});
+
+async function requireBearerLaunch(c: Context<{ Bindings: Env }>, id: string) {
+  const user = await getBearerUser(c);
+  if (!user) return { error: c.json({ error: "Unauthorized" }, 401), user: null, launch: null };
+  const launch = await c.env.DB.prepare(
+    "SELECT id, name, slug, site_url, manual_revenue_cents, created_at FROM launches WHERE id = ? AND user_id = ?",
+  ).bind(id, user.id).first<LaunchRow>();
+  if (!launch) return { error: c.json({ error: "Not found" }, 404), user, launch: null };
+  return { error: null, user, launch };
+}
+
+app.get("/api/v1/me", async (c) => {
+  const user = await getBearerUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const count = await countLaunches(c.env.DB, user.id);
+  return c.json({ user: publicUser(user, count), retention_ms: retentionMs(user.plan) });
+});
+
+app.get("/api/v1/sites", async (c) => {
+  const user = await getBearerUser(c);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const { results } = await c.env.DB.prepare(
+    "SELECT id, name, slug, site_url, created_at FROM launches WHERE user_id = ? ORDER BY created_at DESC",
+  ).bind(user.id).all();
+  return c.json({ sites: results ?? [] });
+});
+
+app.get("/api/v1/sites/:id/overview", async (c) => {
+  const got = await requireBearerLaunch(c, c.req.param("id"));
+  if (got.error || !got.launch || !got.user) return got.error!;
+  const board = await loadBoard(c.env.DB, got.launch, rangeSince(c.req.query("range"), got.user.plan));
+  return c.json({ launch: board.launch, stats: board.stats, series: board.series, live: board.live, range: c.req.query("range") || "30d" });
+});
+
+app.get("/api/v1/sites/:id/sources", async (c) => {
+  const got = await requireBearerLaunch(c, c.req.param("id"));
+  if (got.error || !got.launch || !got.user) return got.error!;
+  const board = await loadBoard(c.env.DB, got.launch, rangeSince(c.req.query("range"), got.user.plan), touchFromQuery(c.req.query("touch")));
+  return c.json({ sources: board.sources, sources_last: board.sources_last, ai: board.ai, touch: board.touch });
+});
+
+app.get("/api/v1/sites/:id/search", async (c) => {
+  const got = await requireBearerLaunch(c, c.req.param("id"));
+  if (got.error || !got.launch) return got.error!;
+  const board = await loadBoard(c.env.DB, got.launch, rangeSince(c.req.query("range"), got.user?.plan));
+  return c.json({ search: board.search, rows: await listSearchRows(c.env.DB, got.launch.id) });
+});
+
+app.get("/api/v1/sites/:id/funnel", async (c) => {
+  const got = await requireBearerLaunch(c, c.req.param("id"));
+  if (got.error || !got.launch || !got.user) return got.error!;
+  const board = await loadBoard(c.env.DB, got.launch, rangeSince(c.req.query("range"), got.user.plan));
+  return c.json({ funnel: board.funnel });
+});
+
+app.get("/api/v1/sites/:id/feed", async (c) => {
+  const got = await requireBearerLaunch(c, c.req.param("id"));
+  if (got.error || !got.launch || !got.user) return got.error!;
+  const board = await loadBoard(c.env.DB, got.launch, rangeSince(c.req.query("range"), got.user.plan));
+  return c.json({ visitors: board.visitors });
 });
 
 app.get("/api/public/:slug", async (c) => {
@@ -402,6 +580,70 @@ app.post("/webhooks/stripe", async (c) => {
   return c.json({ received: true });
 });
 
+
+app.post("/webhooks/polar", async (c) => {
+  const secret = c.env.POLAR_WEBHOOK_SECRET;
+  if (!secret) return c.json({ error: "POLAR_WEBHOOK_SECRET is not configured" }, 500);
+  const rawBody = await c.req.text();
+  const ok = await verifyPolarWebhook(rawBody, {
+    id: c.req.header("webhook-id"),
+    timestamp: c.req.header("webhook-timestamp"),
+    signature: c.req.header("webhook-signature"),
+    polarSignature: c.req.header("polar-signature") || c.req.header("Polar-Signature"),
+  }, secret);
+  if (!ok) return c.json({ error: "Invalid signature" }, 401);
+  let event: { type?: string; data?: unknown; id?: string };
+  try { event = JSON.parse(rawBody) as { type?: string; data?: unknown; id?: string }; }
+  catch { return c.json({ error: "Invalid JSON" }, 400); }
+  const eventId = c.req.header("webhook-id") || (typeof event.id === "string" ? event.id : "");
+  if (eventId) {
+    const existing = await c.env.DB.prepare("SELECT webhook_id FROM webhook_events WHERE webhook_id = ?").bind(eventId).first();
+    if (existing) return c.json({ received: true, duplicate: true });
+    await c.env.DB.prepare("INSERT INTO webhook_events (webhook_id, event_type, payload, processed_at) VALUES (?, ?, ?, ?)").bind(eventId, event.type ?? "unknown", rawBody, Date.now()).run();
+  }
+  await handlePolarEvent(c.env.DB, event);
+  return c.json({ received: true });
+});
+
+app.post("/webhooks/paddle", async (c) => {
+  const secret = c.env.PADDLE_WEBHOOK_SECRET;
+  if (!secret) return c.json({ error: "PADDLE_WEBHOOK_SECRET is not configured" }, 500);
+  const rawBody = await c.req.text();
+  const ok = await verifyPaddleSignature(rawBody, c.req.header("paddle-signature") || c.req.header("Paddle-Signature"), secret);
+  if (!ok) return c.json({ error: "Invalid signature" }, 401);
+  let event: { event_id?: string; event_type?: string; data?: unknown };
+  try { event = JSON.parse(rawBody) as { event_id?: string; event_type?: string; data?: unknown }; }
+  catch { return c.json({ error: "Invalid JSON" }, 400); }
+  const eventId = event.event_id || "";
+  if (eventId) {
+    const existing = await c.env.DB.prepare("SELECT webhook_id FROM webhook_events WHERE webhook_id = ?").bind(eventId).first();
+    if (existing) return c.json({ received: true, duplicate: true });
+    await c.env.DB.prepare("INSERT INTO webhook_events (webhook_id, event_type, payload, processed_at) VALUES (?, ?, ?, ?)").bind(eventId, event.event_type ?? "unknown", rawBody, Date.now()).run();
+  }
+  await handlePaddleEvent(c.env.DB, event);
+  return c.json({ received: true });
+});
+
+app.post("/webhooks/lemon", async (c) => {
+  const secret = c.env.LEMON_SQUEEZY_WEBHOOK_SECRET;
+  if (!secret) return c.json({ error: "LEMON_SQUEEZY_WEBHOOK_SECRET is not configured" }, 500);
+  const rawBody = await c.req.text();
+  const ok = await verifyLemonSignature(rawBody, c.req.header("x-signature") || c.req.header("X-Signature"), secret);
+  if (!ok) return c.json({ error: "Invalid signature" }, 401);
+  let payload: Record<string, unknown>;
+  try { payload = JSON.parse(rawBody) as Record<string, unknown>; }
+  catch { return c.json({ error: "Invalid JSON" }, 400); }
+  const meta = asRecord(payload.meta);
+  const eventId = typeof meta.webhook_id === "string" ? meta.webhook_id : typeof payload.id === "string" ? payload.id : "";
+  if (eventId) {
+    const existing = await c.env.DB.prepare("SELECT webhook_id FROM webhook_events WHERE webhook_id = ?").bind(eventId).first();
+    if (existing) return c.json({ received: true, duplicate: true });
+    await c.env.DB.prepare("INSERT INTO webhook_events (webhook_id, event_type, payload, processed_at) VALUES (?, ?, ?, ?)").bind(eventId, String(meta.event_name ?? "unknown"), rawBody, Date.now()).run();
+  }
+  await handleLemonEvent(c.env.DB, payload);
+  return c.json({ received: true });
+});
+
 async function onPaymentSucceeded(db: D1Database, data: Record<string, unknown>): Promise<void> {
   const email = customerEmailFromDodoPayload(data);
   const paymentId = typeof data.payment_id === "string" ? data.payment_id : null;
@@ -557,7 +799,10 @@ function demoBoard() {
     visitors,
     sources,
     sources_last: sources.map((s) => ({ ...s, revenue_cents: Math.floor(s.revenue_cents * 0.85) })),
-    pages, countries, search: [], ai, series,
+    pages, countries, search: [
+      { query: "acme pricing (demo)", clicks: 48, engine: "gsc" },
+      { query: "acme vs competitors (demo)", clicks: 21, engine: "bing" },
+    ], ai, series,
     funnel: [
       { name: "Land", count: unique },
       { name: "Pricing", count: Math.floor(unique * 0.42) },
@@ -625,6 +870,9 @@ function slugify(value: string): string {
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(purgeExpiredEvents(env.DB));
+    ctx.waitUntil((async () => {
+      await purgeExpiredEvents(env.DB);
+      await syncAllSearch(env);
+    })());
   },
 };

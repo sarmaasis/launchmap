@@ -29,4 +29,8 @@ interface Env {
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
   STRIPE_WEBHOOK_SECRET?: string;
+  POLAR_WEBHOOK_SECRET?: string;
+  PADDLE_WEBHOOK_SECRET?: string;
+  LEMON_SQUEEZY_WEBHOOK_SECRET?: string;
 }
+

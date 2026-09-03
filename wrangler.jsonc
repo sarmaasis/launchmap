@@ -12,6 +12,9 @@
       "/auth/verify",
       "/webhooks/dodo",
       "/webhooks/stripe",
+      "/webhooks/polar",
+      "/webhooks/paddle",
+      "/webhooks/lemon",
       "/t/*",
       "/embed.js"
     ]

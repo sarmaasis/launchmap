@@ -149,7 +149,7 @@ export async function loadBoard(db: D1Database, launch: LaunchRow, since = 0, to
     pages,
     countries,
     ai,
-    search: [] as { query: string; clicks: number }[],
+    search: await loadSearch(db, id),
     series,
     funnel: [
       { name: "Land", count: land?.n ?? 0 },
@@ -161,6 +161,18 @@ export async function loadBoard(db: D1Database, launch: LaunchRow, since = 0, to
     live: mode ? mode.live === 1 : true,
     launch_mode: mode ? { live: mode.live === 1, started_at: mode.started_at, ended_at: mode.ended_at } : { live: true, started_at: null, ended_at: null },
   };
+}
+
+
+async function loadSearch(db: D1Database, launchId: string) {
+  const { results } = await db.prepare(
+    `SELECT query, SUM(clicks) as clicks, engine
+     FROM search_queries WHERE launch_id = ?
+     GROUP BY query, engine
+     ORDER BY clicks DESC
+     LIMIT 12`,
+  ).bind(launchId).all<{ query: string; clicks: number; engine: string }>();
+  return (results ?? []).map((r) => ({ query: r.query, clicks: r.clicks, engine: r.engine }));
 }
 
 export async function loadJourney(db: D1Database, launchId: string, vid: string) {

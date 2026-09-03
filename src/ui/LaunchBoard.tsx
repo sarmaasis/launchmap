@@ -3,7 +3,7 @@ import { useState } from "react";
 export type SourceRow = { name: string; visitors: number; revenue_cents: number };
 export type PageRow = { path: string; views: number };
 export type CountryRow = { country: string; visitors: number };
-export type SearchRow = { query: string; clicks: number };
+export type SearchRow = { query: string; clicks: number; engine?: string };
 export type DeviceRow = { name: string; pct: number };
 export type SeriesPoint = { hour_ts: number; views: number; uniques: number; signups: number; revenue_cents: number };
 export type FunnelStep = { name: string; count: number };
@@ -302,11 +302,11 @@ export default function LaunchBoard({
             <h4>Search queries</h4>
             <div className="table">
               {search.length ? search.map((q) => (
-                <div className="tr" key={q.query}>
-                  <span className="td name">{q.query}</span>
+                <div className="tr" key={`${q.engine ?? 'q'}:${q.query}`}>
+                  <span className="td name">{q.query}{q.engine ? ` (${q.engine})` : ''}</span>
                   <span className="td num">{q.clicks}</span>
                 </div>
-              )) : <p className="muted">Connect Search Console to see queries next to revenue.</p>}
+              )) : <p className="muted">{data.demo ? 'Demo queries show here.' : 'Queries appear after you connect Search Console or Bing.'}</p>}
             </div>
             <h4>Countries</h4>
             <div className="chips">
